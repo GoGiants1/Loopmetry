@@ -6,6 +6,8 @@ on:
     paths:
       - ".github/workflows/apply-loopmetry-v0.3.yml"
       - ".loopmetry-release/**"
+  issues:
+    types: [opened]
   workflow_dispatch:
 
 permissions:
@@ -13,6 +15,7 @@ permissions:
 
 jobs:
   apply:
+    if: github.event_name != 'issues' || github.event.issue.title == '[loopmetry-release] apply v0.3'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -51,8 +54,6 @@ jobs:
           uv build
 
       - name: Commit and update main
-        env:
-          BASE_SHA: 5a2c2bbed7dc6526ae5ae51ffaa90ca60bd2852f
         run: |
           set -euo pipefail
           git config user.name "Loopmetry Release Bot"
@@ -60,5 +61,3 @@ jobs:
           git add -A
           git commit -m "feat: add one-command submission and cohort administration"
           git push --force-with-lease=refs/heads/main:${GITHUB_SHA} origin HEAD:main
-
-# retrigger: 2026-08-22T14:35:00Z
