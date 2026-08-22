@@ -6,6 +6,8 @@ on:
     paths:
       - ".github/workflows/apply-loopmetry-v0.3.yml"
       - ".loopmetry-release/**"
+  pull_request:
+    types: [opened, synchronize, reopened]
   issues:
     types: [opened]
   workflow_dispatch:
@@ -15,7 +17,10 @@ permissions:
 
 jobs:
   apply:
-    if: github.event_name != 'issues' || github.event.issue.title == '[loopmetry-release] apply v0.3'
+    if: >-
+      github.event_name != 'issues' && github.event_name != 'pull_request' ||
+      github.event_name == 'issues' && github.event.issue.title == '[loopmetry-release] apply v0.3' ||
+      github.event_name == 'pull_request' && github.event.pull_request.title == '[loopmetry-release] apply v0.3'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -54,10 +59,16 @@ jobs:
           uv build
 
       - name: Commit and update main
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           set -euo pipefail
           git config user.name "Loopmetry Release Bot"
           git config user.email "actions@users.noreply.github.com"
           git add -A
           git commit -m "feat: add one-command submission and cohort administration"
-          git push --force-with-lease=refs/heads/main:${GITHUB_SHA} origin HEAD:main
+          lease_sha="${GITHUB_SHA}"
+          if [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]]; then
+            lease_sha="${PR_BASE_SHA}"
+          fi
+          git push --force-with-lease=refs/heads/main:${lease_sha} origin HEAD:main
