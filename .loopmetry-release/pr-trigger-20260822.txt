@@ -1,2 +1,3 @@
 Trigger the Loopmetry v0.3 rollout through a same-repository pull request.
 Retry after independent part decoding was enabled.
+Diagnostic pass for staged part boundaries.
