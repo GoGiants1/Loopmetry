@@ -15,23 +15,28 @@ jobs:
       matrix:
         python-version: ["3.11", "3.12", "3.13"]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install uv
-        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
         with:
+          version: "0.12.5"
           python-version: ${{ matrix.python-version }}
           enable-cache: true
+      - name: Sync environment
+        run: uv sync --locked
       - name: Check lockfile
         run: uv lock --check
-      - name: Sync environment
-        run: uv sync --locked --all-groups
+      - name: Lint
+        run: uvx --from ruff==0.12.12 ruff check .
       - name: Unit tests
         run: uv run python -m unittest discover -s tests -v
       - name: Validate demo data
         run: uv run loopmetry validate examples/demo_project.jsonl
-      - name: Render demo reports
+      - name: Render demo reports and participant run
         run: |
           uv run loopmetry analyze examples/demo_project.jsonl --format json --output /tmp/report.json
           uv run loopmetry analyze examples/demo_project.jsonl --format html --output /tmp/report.html
+          uv run loopmetry bundle examples/demo_project.jsonl --output /tmp/demo.llm-eval-bundle.json
+          uv run loopmetry run --input examples/demo_project.jsonl --assignment-id ci --submitter-id runner --output-root /tmp/loopmetry-runs
       - name: Build package
         run: uv build
