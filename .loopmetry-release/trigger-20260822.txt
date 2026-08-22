@@ -1,0 +1,1 @@
+Trigger the staged Loopmetry v0.3 rollout after GitHub write access was restored.
