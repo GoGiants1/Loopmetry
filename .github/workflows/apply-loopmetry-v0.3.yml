@@ -1,6 +1,8 @@
 name: Apply Loopmetry v0.3 snapshot
 
 on:
+  pull_request:
+    types: [opened, synchronize, reopened]
   issues:
     types: [opened]
   workflow_dispatch:
@@ -12,7 +14,8 @@ jobs:
   apply:
     if: >-
       github.event_name == 'workflow_dispatch' ||
-      github.event_name == 'issues' && github.event.issue.title == '[loopmetry-release] apply v0.3'
+      github.event_name == 'issues' && github.event.issue.title == '[loopmetry-release] apply v0.3' ||
+      github.event_name == 'pull_request' && github.event.pull_request.title == '[loopmetry-release] apply v0.3'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -43,9 +46,8 @@ jobs:
           find . -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
           cp -a /tmp/loopmetry-v0.3/Loopmetry-v0.3/. .
 
-          # GITHUB_TOKEN can update repository contents but cannot create, modify,
-          # or delete workflow files without the separate workflows permission.
-          # Keep the current workflow tree unchanged; the connector applies the
+          # The Actions token has contents:write but no workflows permission.
+          # Preserve the current workflow tree exactly; the connector updates the
           # final CI workflow and removes this one after the source commit lands.
           rm -rf .github/workflows
           mkdir -p .github/workflows
