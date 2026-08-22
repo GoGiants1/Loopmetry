@@ -1,1 +1,2 @@
-Trigger the staged Loopmetry v0.3 rollout after GitHub write access was restored.
+Loopmetry v0.3 rollout trigger
+Requested direct repository materialization at 2026-08-23.
