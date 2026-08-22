@@ -5,11 +5,12 @@
 ```bash
 git clone https://github.com/GoGiants1/Loopmetry.git
 cd Loopmetry
-uv sync --all-groups
+uv sync --locked
 uv run python -m unittest discover -s tests -v
+uvx --from ruff==0.12.12 ruff check .
 ```
 
-Use `uv` for Python versions, environments, dependency groups, locking, running tools, and builds. Runtime code should remain standard-library-only unless a dependency has a clear security, maintenance, and portability justification.
+Use `uv` for Python versions, environments, locking, commands, and builds. Runtime code should remain standard-library-only unless a dependency has a clear security, maintenance, and portability justification.
 
 ## Design requirements
 
@@ -51,17 +52,32 @@ A metric proposal must include:
 Keep changes focused and include tests. For user-visible changes, update the relevant document in `docs/` and the example report workflow when applicable.
 
 
-## Dependency changes
+## Dependency and environment changes
 
 Update `pyproject.toml`, run `uv lock`, and commit `uv.lock`. Verify with:
 
 ```bash
 uv lock --check
-uv sync --locked --all-groups
+uv sync --locked
 ```
 
-Do not add `requirements.txt`, Poetry, pip-tools, or a separately managed virtual environment.
+Do not add `requirements.txt`, Poetry, pip-tools, or a separately managed virtual environment. One-shot developer tools should use the repository-pinned `uvx --from package==version` command documented in `AGENTS.md`.
 
 ## Coding-agent instructions
 
 `AGENTS.md` is the shared source of repository instructions. `CLAUDE.md` imports it so Codex and Claude Code receive the same rules. Keep the shared instructions concrete, current, and consistent with the architecture and responsible-use documents.
+
+## Submission and administrator changes
+
+Changes to `submission.py`, `admin_storage.py`, `admin_server.py`, or `workflow.py` must preserve:
+
+- content-addressed and idempotent submissions;
+- enrollment-token identity binding;
+- no raw event/transcript upload;
+- complete-roster visibility, including non-submitters;
+- attempt and status history;
+- manual review state independent of scores;
+- loopback-first server behavior and remote HTTPS requirements; and
+- tests for duplicate upload, token rotation, CSRF, and malformed payloads.
+
+Update `schemas/submission-v1.schema.json` and `docs/submission-workflow.md` whenever the external envelope changes. Use a new schema version for breaking changes.

@@ -1,0 +1,86 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://loopmetry.dev/schemas/submission-v1.schema.json",
+  "title": "Loopmetry participant submission v1",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "schema_version",
+    "submission_id",
+    "assignment_id",
+    "submitter_id",
+    "project_id",
+    "run_id",
+    "created_at",
+    "client",
+    "input_summary",
+    "report",
+    "privacy"
+  ],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "submission_id": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "assignment_id": {"type": "string", "minLength": 1, "maxLength": 128},
+    "submitter_id": {"type": "string", "minLength": 1, "maxLength": 128},
+    "project_id": {"type": "string", "minLength": 1, "maxLength": 128},
+    "run_id": {"type": "string", "minLength": 1, "maxLength": 128},
+    "created_at": {"type": "string", "format": "date-time"},
+    "client": {
+      "type": "object",
+      "required": ["name", "version"],
+      "properties": {
+        "name": {"const": "loopmetry"},
+        "version": {"type": "string", "minLength": 1}
+      },
+      "additionalProperties": true
+    },
+    "input_summary": {
+      "type": "object",
+      "required": [
+        "event_count",
+        "session_count",
+        "sources",
+        "source_file_count",
+        "started_at",
+        "ended_at"
+      ],
+      "properties": {
+        "event_count": {"type": "integer", "minimum": 1},
+        "session_count": {"type": "integer", "minimum": 0},
+        "sources": {"type": "array", "items": {"type": "string", "minLength": 1}},
+        "source_file_count": {"type": "integer", "minimum": 1},
+        "started_at": {"type": "string", "format": "date-time"},
+        "ended_at": {"type": "string", "format": "date-time"}
+      },
+      "additionalProperties": false
+    },
+    "report": {
+      "type": "object",
+      "required": [
+        "schema_version",
+        "project_id",
+        "generated_at",
+        "snapshot",
+        "metrics",
+        "non_scored_signals",
+        "measurement_gaps"
+      ]
+    },
+    "privacy": {
+      "type": "object",
+      "required": [
+        "raw_transcripts_included",
+        "raw_source_code_included",
+        "canonical_events_included",
+        "absolute_source_paths_included"
+      ],
+      "properties": {
+        "raw_transcripts_included": {"const": false},
+        "raw_source_code_included": {"const": false},
+        "canonical_events_included": {"const": false},
+        "absolute_source_paths_included": {"const": false}
+      },
+      "additionalProperties": false
+    }
+  }
+}

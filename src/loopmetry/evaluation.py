@@ -14,6 +14,15 @@ from .evaluation_models import (
     ProjectSnapshot,
     SteeringSignal,
 )
+
+__all__ = [
+    "EvidenceRef",
+    "MetricResult",
+    "ProjectEvaluator",
+    "ProjectReport",
+    "ProjectSnapshot",
+    "SteeringSignal",
+]
 from .metrics_recovery import RecoveryMetricsMixin
 from .metrics_traceability import TraceabilityMetricsMixin
 

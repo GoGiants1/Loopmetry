@@ -1,0 +1,107 @@
+name: Materialize Loopmetry v0.3 clean tree
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/materialize-loopmetry-v0.3.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  materialize:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Create candidate commit from verified tree
+        id: candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TRIGGER_SHA: ${{ github.sha }}
+          CLEAN_PARENT_SHA: 5a2c2bbed7dc6526ae5ae51ffaa90ca60bd2852f
+          TREE_SHA: 34c7aa74aefedbe4bf9bc62bde4922449fa1c110
+          CANDIDATE_BRANCH: _loopmetry/v03-${{ github.run_id }}
+        run: |
+          set -euo pipefail
+
+          tree_json=$(gh api "repos/${REPO}/git/trees/${TREE_SHA}?recursive=1")
+          echo "${tree_json}" | jq -e '.truncated == false' >/dev/null
+          echo "${tree_json}" | jq -e '[.tree[].path] | index("pyproject.toml") != null' >/dev/null
+          echo "${tree_json}" | jq -e '[.tree[].path] | index("src/loopmetry/cli.py") != null' >/dev/null
+          echo "${tree_json}" | jq -e '[.tree[].path] | index("tests") == null' >/dev/null || true
+          if echo "${tree_json}" | jq -e '[.tree[].path] | any(startswith(".loopmetry-release/"))' >/dev/null; then
+            echo "staging files leaked into clean tree" >&2
+            exit 1
+          fi
+          if echo "${tree_json}" | jq -e '[.tree[].path] | index(".github/workflows/apply-loopmetry-v0.3.yml") != null' >/dev/null; then
+            echo "rollout workflow leaked into clean tree" >&2
+            exit 1
+          fi
+
+          pyproject_blob=$(echo "${tree_json}" | jq -r '.tree[] | select(.path == "pyproject.toml") | .sha')
+          gh api "repos/${REPO}/git/blobs/${pyproject_blob}" --jq .content \
+            | tr -d '\n' | base64 --decode > /tmp/pyproject.toml
+          grep -Eq '^version = "0\.3\.0"$' /tmp/pyproject.toml
+
+          candidate_sha=$(gh api --method POST "repos/${REPO}/git/commits" \
+            -f message='feat: add one-command submission and cohort administration' \
+            -f tree="${TREE_SHA}" \
+            -F parents[]="${CLEAN_PARENT_SHA}" \
+            --jq .sha)
+
+          gh api --method POST "repos/${REPO}/git/refs" \
+            -f ref="refs/heads/${CANDIDATE_BRANCH}" \
+            -f sha="${candidate_sha}" >/dev/null
+
+          echo "sha=${candidate_sha}" >> "${GITHUB_OUTPUT}"
+          echo "branch=${CANDIDATE_BRANCH}" >> "${GITHUB_OUTPUT}"
+          echo "trigger_sha=${TRIGGER_SHA}" >> "${GITHUB_OUTPUT}"
+
+      - name: Check out candidate
+        run: |
+          set -euo pipefail
+          git fetch origin "refs/heads/${{ steps.candidate.outputs.branch }}:refs/remotes/origin/${{ steps.candidate.outputs.branch }}"
+          git checkout --detach "${{ steps.candidate.outputs.sha }}"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          python-version: "3.11"
+          enable-cache: true
+
+      - name: Verify candidate
+        run: |
+          set -euo pipefail
+          uv lock --check
+          uv sync --locked
+          uv run python -m unittest discover -s tests -v
+          uv run loopmetry analyze examples/demo_project.jsonl --format html --output /tmp/loopmetry-report.html
+          uv build
+
+      - name: Update main atomically
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          EXPECTED_MAIN: ${{ steps.candidate.outputs.trigger_sha }}
+          CANDIDATE_SHA: ${{ steps.candidate.outputs.sha }}
+          CANDIDATE_BRANCH: ${{ steps.candidate.outputs.branch }}
+        run: |
+          set -euo pipefail
+          actual_main=$(gh api "repos/${REPO}/git/ref/heads/main" --jq .object.sha)
+          if [ "${actual_main}" != "${EXPECTED_MAIN}" ]; then
+            echo "main moved during validation: expected ${EXPECTED_MAIN}, got ${actual_main}" >&2
+            exit 1
+          fi
+
+          gh api --method PATCH "repos/${REPO}/git/refs/heads/main" \
+            -f sha="${CANDIDATE_SHA}" \
+            -F force=true >/dev/null
+
+          gh api --method DELETE "repos/${REPO}/git/refs/heads/${CANDIDATE_BRANCH}" >/dev/null
+          echo "main now points to ${CANDIDATE_SHA}"

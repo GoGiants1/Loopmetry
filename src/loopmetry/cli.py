@@ -3,17 +3,51 @@
 from __future__ import annotations
 
 import argparse
+import csv
+import io
+import json
+import os
+import shlex
 import sys
 from pathlib import Path
-from typing import Sequence
+from typing import Any, Sequence
 
 from . import __version__
+from .admin_server import (
+    DEFAULT_ADMIN_BIND,
+    DEFAULT_ADMIN_PORT,
+    DEFAULT_ADMIN_TOKEN_ENV,
+    AdminServerError,
+    create_admin_server,
+)
+from .admin_storage import AdminStorageError, AdminStore, REVIEW_STATUSES
 from .evaluation import ProjectEvaluator
+from .hook_capture import (
+    HookCaptureError,
+    append_events,
+    default_capture_path,
+    normalize_hook_payload,
+)
 from .io import InputError, load_jsonl, select_project
+from .llm_bundle import BundleError, build_evaluation_bundle, render_evaluation_bundle
 from .report import render
 from .storage import EventStore
+from .submission import (
+    DEFAULT_SUBMISSION_TOKEN_ENV,
+    SubmissionError,
+    load_submission,
+    submit_envelope,
+    token_from_environment,
+    write_private_text,
+)
+from .workflow import discover_event_files, run_participant_workflow
 
 DEFAULT_DB = Path(".loopmetry/loopmetry.db")
+DEFAULT_ADMIN_DB = Path(".loopmetry/admin.db")
+DEFAULT_SERVER_ENV = "LOOPMETRY_SERVER_URL"
+DEFAULT_ASSIGNMENT_ENV = "LOOPMETRY_ASSIGNMENT_ID"
+DEFAULT_SUBMITTER_ENV = "LOOPMETRY_SUBMITTER_ID"
+DEFAULT_UVX_SOURCE = "git+https://github.com/GoGiants1/Loopmetry.git"
 
 
 def _write_output(content: str, output: str | None) -> None:
@@ -22,16 +56,156 @@ def _write_output(content: str, output: str | None) -> None:
         if not content.endswith("\n"):
             sys.stdout.write("\n")
         return
-    output_path = Path(output)
+    output_path = Path(output).expanduser()
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(content, encoding="utf-8")
     print(f"wrote {output_path}")
 
 
+def _read_json_object_from_stdin() -> dict[str, Any]:
+    raw = sys.stdin.read()
+    if not raw.strip():
+        raise HookCaptureError("hook capture expects one JSON object on stdin")
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise HookCaptureError(f"hook payload is not valid JSON: {exc}") from exc
+    if not isinstance(value, dict):
+        raise HookCaptureError("hook payload must be a JSON object")
+    return value
+
+
+def _participant_source_files(args: argparse.Namespace) -> list[Path]:
+    if args.input:
+        return [Path(path).expanduser() for path in args.input]
+    discovered = discover_event_files(args.root)
+    if not discovered:
+        raise InputError(
+            f"no Loopmetry event files found below {Path(args.root).expanduser()}; "
+            "pass --input or configure capture hooks"
+        )
+    return discovered
+
+
+def _required_run_identity(args: argparse.Namespace) -> tuple[str, str]:
+    assignment_id = (args.assignment_id or "").strip()
+    submitter_id = (args.submitter_id or "").strip()
+    if not assignment_id:
+        raise SubmissionError(
+            f"--assignment-id or environment variable {DEFAULT_ASSIGNMENT_ENV} is required"
+        )
+    if not submitter_id:
+        raise SubmissionError(
+            f"--submitter-id or environment variable {DEFAULT_SUBMITTER_ENV} is required"
+        )
+    return assignment_id, submitter_id
+
+
+def _read_roster(path: str | Path) -> list[tuple[str, str]]:
+    roster_path = Path(path).expanduser()
+    try:
+        with roster_path.open("r", encoding="utf-8-sig", newline="") as handle:
+            reader = csv.DictReader(handle)
+            if not reader.fieldnames or "submitter_id" not in reader.fieldnames:
+                raise AdminStorageError("roster CSV requires a submitter_id column")
+            rows: list[tuple[str, str]] = []
+            for line_number, row in enumerate(reader, start=2):
+                submitter_id = (row.get("submitter_id") or "").strip()
+                display_name = (row.get("display_name") or "").strip()
+                if not submitter_id:
+                    raise AdminStorageError(
+                        f"roster CSV line {line_number} has an empty submitter_id"
+                    )
+                rows.append((submitter_id, display_name))
+            return rows
+    except OSError as exc:
+        raise AdminStorageError(f"cannot read roster CSV {roster_path}: {exc}") from exc
+
+
+
+def _quote_powershell(value: str) -> str:
+    """Quote one argument for a copy/paste PowerShell command."""
+
+    if value and all(character.isalnum() or character in "-._/:+@" for character in value):
+        return value
+    return "'" + value.replace("'", "''") + "'"
+
+def _credentials_csv(
+    enrollments: Sequence[Any],
+    *,
+    server_url: str | None,
+) -> str:
+    buffer = io.StringIO(newline="")
+    fields = [
+        "assignment_id",
+        "submitter_id",
+        "display_name",
+        "submission_token",
+        "run_command",
+        "run_command_powershell",
+    ]
+    writer = csv.DictWriter(buffer, fieldnames=fields)
+    writer.writeheader()
+    for enrollment in enrollments:
+        command = ""
+        powershell_command = ""
+        if server_url:
+            runner = [
+                "uvx",
+                "--from",
+                DEFAULT_UVX_SOURCE,
+                "loopmetry",
+                "run",
+                "--assignment-id",
+                enrollment.assignment_id,
+                "--submitter-id",
+                enrollment.submitter_id,
+                "--server",
+                server_url,
+            ]
+            command = " ".join(
+                [
+                    f"{DEFAULT_SUBMISSION_TOKEN_ENV}={shlex.quote(enrollment.token)}",
+                    *(shlex.quote(part) for part in runner),
+                ]
+            )
+            ps_token = enrollment.token.replace("'", "''")
+            powershell_command = (
+                f"$env:{DEFAULT_SUBMISSION_TOKEN_ENV}='{ps_token}'; "
+                + " ".join(_quote_powershell(part) for part in runner)
+            )
+        writer.writerow(
+            {
+                "assignment_id": enrollment.assignment_id,
+                "submitter_id": enrollment.submitter_id,
+                "display_name": enrollment.display_name,
+                "submission_token": enrollment.token,
+                "run_command": command,
+                "run_command_powershell": powershell_command,
+            }
+        )
+    return buffer.getvalue()
+
+
+def _export_csv(rows: Sequence[dict[str, object]]) -> str:
+    fieldnames: list[str] = []
+    for row in rows:
+        for key in row:
+            if key not in fieldnames:
+                fieldnames.append(key)
+    if not fieldnames:
+        fieldnames = ["assignment_id", "submitter_id", "display_name", "state"]
+    buffer = io.StringIO(newline="")
+    writer = csv.DictWriter(buffer, fieldnames=fieldnames, extrasaction="ignore")
+    writer.writeheader()
+    writer.writerows(rows)
+    return buffer.getvalue()
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="loopmetry",
-        description="Local-first project evidence evaluation for AI coding workflows.",
+        description="Evidence-backed project evaluation and submission for AI coding workflows.",
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -44,10 +218,75 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     analyze.add_argument("input", help="Path to normalized JSONL events.")
     analyze.add_argument("--project-id", help="Project ID when the file contains multiple projects.")
-    analyze.add_argument(
-        "--format", choices=("markdown", "json", "html"), default="markdown"
-    )
+    analyze.add_argument("--format", choices=("markdown", "json", "html"), default="markdown")
     analyze.add_argument("--output", help="Output path; use '-' or omit for stdout.")
+
+    run = subparsers.add_parser(
+        "run",
+        help="One-command analysis, local report generation, and optional administrator upload.",
+    )
+    run.add_argument(
+        "--input",
+        action="append",
+        default=[],
+        help="Normalized JSONL input. Repeat to merge files; otherwise discover .loopmetry hooks.",
+    )
+    run.add_argument("--root", default=".", help="Project root used for event discovery.")
+    run.add_argument("--project-id", help="Project ID when inputs contain multiple projects.")
+    run.add_argument(
+        "--assignment-id",
+        default=os.environ.get(DEFAULT_ASSIGNMENT_ENV),
+        help=f"Assignment ID; defaults to ${DEFAULT_ASSIGNMENT_ENV}.",
+    )
+    run.add_argument(
+        "--submitter-id",
+        default=os.environ.get(DEFAULT_SUBMITTER_ENV),
+        help=f"Roster identity; defaults to ${DEFAULT_SUBMITTER_ENV}.",
+    )
+    run.add_argument(
+        "--server",
+        default=os.environ.get(DEFAULT_SERVER_ENV),
+        help=f"Administrator base URL; defaults to ${DEFAULT_SERVER_ENV}. Omit for local-only.",
+    )
+    run.add_argument(
+        "--token-env",
+        default=DEFAULT_SUBMISSION_TOKEN_ENV,
+        help="Environment variable containing the enrollment token.",
+    )
+    run.add_argument("--output-root", default=".loopmetry/runs")
+    run.add_argument("--timeout", type=float, default=30.0, help="Upload timeout in seconds.")
+
+    submit = subparsers.add_parser(
+        "submit", help="Retry upload of an existing submission.json without re-running analysis."
+    )
+    submit.add_argument("input", help="Path to submission.json.")
+    submit.add_argument(
+        "--server",
+        default=os.environ.get(DEFAULT_SERVER_ENV),
+        help=f"Administrator base URL; defaults to ${DEFAULT_SERVER_ENV}.",
+    )
+    submit.add_argument("--token-env", default=DEFAULT_SUBMISSION_TOKEN_ENV)
+    submit.add_argument("--timeout", type=float, default=30.0)
+    submit.add_argument("--receipt", help="Optional receipt JSON output path.")
+
+    bundle = subparsers.add_parser(
+        "bundle",
+        help="Build a bounded JSON payload for a future optional LLM evaluation provider.",
+    )
+    bundle.add_argument("input", help="Path to normalized JSONL events.")
+    bundle.add_argument("--project-id", help="Project ID when the file contains multiple projects.")
+    bundle.add_argument("--max-events", type=int, default=1_000)
+    bundle.add_argument("--max-bytes", type=int, default=1_000_000)
+    bundle.add_argument("--output", help="Output path; use '-' or omit for stdout.")
+
+    capture = subparsers.add_parser(
+        "capture-hook",
+        help="Read one Claude Code or Codex hook payload from stdin and append safe events.",
+    )
+    capture.add_argument("--source", choices=("claude-code", "codex"), required=True)
+    capture.add_argument("--project-id", help="Explicit project ID; otherwise derived from cwd.")
+    capture.add_argument("--output", help="Defaults to <cwd>/.loopmetry/hooks/<source>.jsonl.")
+    capture.add_argument("--verbose", action="store_true")
 
     ingest = subparsers.add_parser("ingest", help="Persist normalized events in SQLite.")
     ingest.add_argument("input", help="Path to normalized JSONL events.")
@@ -56,14 +295,176 @@ def _build_parser() -> argparse.ArgumentParser:
     report = subparsers.add_parser("report", help="Evaluate one project from SQLite.")
     report.add_argument("project_id", help="Project ID stored in SQLite.")
     report.add_argument("--db", default=str(DEFAULT_DB), help="SQLite database path.")
-    report.add_argument(
-        "--format", choices=("markdown", "json", "html"), default="markdown"
-    )
+    report.add_argument("--format", choices=("markdown", "json", "html"), default="markdown")
     report.add_argument("--output", help="Output path; use '-' or omit for stdout.")
 
     projects = subparsers.add_parser("projects", help="List projects in SQLite.")
     projects.add_argument("--db", default=str(DEFAULT_DB), help="SQLite database path.")
+
+    admin = subparsers.add_parser("admin", help="Manage roster, submissions, and dashboard.")
+    admin_subparsers = admin.add_subparsers(dest="admin_command", required=True)
+
+    enroll = admin_subparsers.add_parser("enroll", help="Enroll or rotate one participant token.")
+    enroll.add_argument("--db", default=str(DEFAULT_ADMIN_DB))
+    enroll.add_argument("--assignment-id", required=True)
+    enroll.add_argument("--submitter-id", required=True)
+    enroll.add_argument("--display-name", default="")
+    enroll.add_argument("--rotate", action="store_true")
+    enroll.add_argument("--format", choices=("text", "json"), default="text")
+
+    import_roster = admin_subparsers.add_parser(
+        "import-roster", help="Enroll a CSV roster and write one-time participant tokens."
+    )
+    import_roster.add_argument("input", help="CSV with submitter_id and optional display_name.")
+    import_roster.add_argument("--db", default=str(DEFAULT_ADMIN_DB))
+    import_roster.add_argument("--assignment-id", required=True)
+    import_roster.add_argument("--output", required=True, help="Private credentials CSV output.")
+    import_roster.add_argument("--server", help="Optional URL embedded in ready-to-run commands.")
+
+    admin_list = admin_subparsers.add_parser("list", help="List roster and latest submission state.")
+    admin_list.add_argument("--db", default=str(DEFAULT_ADMIN_DB))
+    admin_list.add_argument("--assignment-id")
+    admin_list.add_argument("--status", choices=("not_submitted", *REVIEW_STATUSES))
+    admin_list.add_argument("--query")
+    admin_list.add_argument("--format", choices=("text", "json"), default="text")
+
+    set_status = admin_subparsers.add_parser("set-status", help="Update manual review state.")
+    set_status.add_argument("submission_id")
+    set_status.add_argument("status", choices=REVIEW_STATUSES)
+    set_status.add_argument("--note", default="")
+    set_status.add_argument("--db", default=str(DEFAULT_ADMIN_DB))
+
+    export = admin_subparsers.add_parser("export", help="Export latest roster state as CSV.")
+    export.add_argument("--db", default=str(DEFAULT_ADMIN_DB))
+    export.add_argument("--assignment-id")
+    export.add_argument("--output", required=True)
+
+    serve = admin_subparsers.add_parser("serve", help="Run submission API and HTML dashboard.")
+    serve.add_argument("--db", default=str(DEFAULT_ADMIN_DB))
+    serve.add_argument("--bind", default=DEFAULT_ADMIN_BIND)
+    serve.add_argument("--port", type=int, default=DEFAULT_ADMIN_PORT)
+    serve.add_argument("--admin-token-env", default=DEFAULT_ADMIN_TOKEN_ENV)
+    serve.add_argument("--max-submission-bytes", type=int, default=2_000_000)
+    serve.add_argument(
+        "--allow-remote",
+        action="store_true",
+        help="Allow a non-loopback bind. Put the server behind TLS and access control.",
+    )
     return parser
+
+
+def _run_admin(args: argparse.Namespace) -> int:
+    store = AdminStore(args.db)
+    if args.admin_command == "enroll":
+        enrollment = store.enroll(
+            assignment_id=args.assignment_id,
+            submitter_id=args.submitter_id,
+            display_name=args.display_name,
+            rotate=args.rotate,
+        )
+        if args.format == "json":
+            _write_output(json.dumps(enrollment.to_mapping(), ensure_ascii=False, indent=2), None)
+        else:
+            print(f"assignment: {enrollment.assignment_id}")
+            print(f"submitter: {enrollment.submitter_id}")
+            print(f"submission token: {enrollment.token}")
+            print("Store this token securely; only its hash is retained by the server.")
+        return 0
+
+    if args.admin_command == "import-roster":
+        participants = _read_roster(args.input)
+        enrollments = store.enroll_many(
+            assignment_id=args.assignment_id,
+            participants=participants,
+        )
+        content = _credentials_csv(enrollments, server_url=args.server)
+        path = write_private_text(args.output, content)
+        print(f"enrolled {len(enrollments)} participant(s); wrote private credentials to {path}")
+        return 0
+
+    if args.admin_command == "list":
+        overview = store.list_overview(
+            assignment_id=args.assignment_id,
+            status=args.status,
+            query=args.query,
+        )
+        if args.format == "json":
+            value = [
+                {
+                    "assignment_id": item.participant.assignment_id,
+                    "submitter_id": item.participant.submitter_id,
+                    "display_name": item.participant.display_name,
+                    "state": item.state,
+                    "latest_submission": item.latest.summary_mapping() if item.latest else None,
+                }
+                for item in overview
+            ]
+            _write_output(json.dumps(value, ensure_ascii=False, indent=2), None)
+        else:
+            print("assignment\tsubmitter\tname\tstate\tattempt\tproject\treceived")
+            for item in overview:
+                latest = item.latest
+                print(
+                    "\t".join(
+                        [
+                            item.participant.assignment_id,
+                            item.participant.submitter_id,
+                            item.participant.display_name,
+                            item.state,
+                            str(latest.attempt) if latest else "",
+                            latest.project_id if latest else "",
+                            latest.received_at if latest else "",
+                        ]
+                    )
+                )
+        return 0
+
+    if args.admin_command == "set-status":
+        updated = store.update_status(args.submission_id, args.status, args.note)
+        print(
+            f"updated {updated.submission_id}: status={updated.status} "
+            f"submitter={updated.submitter_id} attempt={updated.attempt}"
+        )
+        return 0
+
+    if args.admin_command == "export":
+        rows = store.export_rows(assignment_id=args.assignment_id)
+        path = write_private_text(args.output, _export_csv(rows))
+        print(f"exported {len(rows)} roster row(s) to {path}")
+        return 0
+
+    if args.admin_command == "serve":
+        loopback_names = {"127.0.0.1", "localhost", "::1"}
+        if args.bind not in loopback_names and not args.allow_remote:
+            raise AdminServerError(
+                "non-loopback bind requires --allow-remote and a TLS/authenticated reverse proxy"
+            )
+        admin_token = os.environ.get(args.admin_token_env, "").strip()
+        if not admin_token:
+            raise AdminServerError(
+                f"environment variable {args.admin_token_env} is required"
+            )
+        server = create_admin_server(
+            database=args.db,
+            admin_token=admin_token,
+            bind=args.bind,
+            port=args.port,
+            max_submission_bytes=args.max_submission_bytes,
+        )
+        host, port = server.server_address[:2]
+        print(f"Loopmetry admin server listening on http://{host}:{port}")
+        print("Dashboard username: admin")
+        print(f"Dashboard password: value of ${args.admin_token_env}")
+        print("Remote participant uploads require HTTPS termination in front of this server.")
+        try:
+            server.serve_forever()
+        except KeyboardInterrupt:
+            print("\nshutting down")
+        finally:
+            server.server_close()
+        return 0
+
+    raise AssertionError(f"unhandled admin command: {args.admin_command}")
 
 
 def _run(args: argparse.Namespace) -> int:
@@ -79,13 +480,86 @@ def _run(args: argparse.Namespace) -> int:
         _write_output(render(report, args.format), args.output)
         return 0
 
+    if args.command == "run":
+        assignment_id, submitter_id = _required_run_identity(args)
+        source_files = _participant_source_files(args)
+        token = token_from_environment(args.token_env) if args.server else None
+        artifacts = run_participant_workflow(
+            source_files,
+            assignment_id=assignment_id,
+            submitter_id=submitter_id,
+            project_id=args.project_id,
+            output_root=args.output_root,
+            server_url=args.server,
+            submission_token=token,
+            timeout_seconds=args.timeout,
+        )
+        print(f"analysis complete: project={artifacts.report.project_id} run={artifacts.run_id}")
+        print(f"HTML report: {artifacts.report_html}")
+        print(f"submission file: {artifacts.submission_json}")
+        if artifacts.receipt:
+            duplicate = " duplicate" if artifacts.receipt.duplicate else ""
+            print(
+                f"uploaded:{duplicate} submission={artifacts.receipt.submission_id} "
+                f"attempt={artifacts.receipt.attempt} status={artifacts.receipt.status}"
+            )
+        else:
+            print("upload skipped: no --server was configured")
+        return 0
+
+    if args.command == "submit":
+        if not args.server:
+            raise SubmissionError(
+                f"--server or environment variable {DEFAULT_SERVER_ENV} is required"
+            )
+        envelope = load_submission(args.input)
+        token = token_from_environment(args.token_env)
+        receipt = submit_envelope(
+            args.server,
+            token,
+            envelope,
+            timeout_seconds=args.timeout,
+        )
+        rendered = json.dumps(receipt.to_mapping(), ensure_ascii=False, indent=2) + "\n"
+        if args.receipt:
+            write_private_text(args.receipt, rendered)
+            print(f"wrote receipt {args.receipt}")
+        else:
+            _write_output(rendered, None)
+        return 0
+
+    if args.command == "bundle":
+        events = select_project(load_jsonl(args.input), args.project_id)
+        bundle = build_evaluation_bundle(
+            events,
+            max_events=args.max_events,
+            max_bytes=args.max_bytes,
+        )
+        _write_output(render_evaluation_bundle(bundle), args.output)
+        return 0
+
+    if args.command == "capture-hook":
+        payload = _read_json_object_from_stdin()
+        events = normalize_hook_payload(
+            payload,
+            source=args.source,
+            project_id=args.project_id,
+        )
+        destination = (
+            Path(args.output).expanduser()
+            if args.output
+            else default_capture_path(payload, source=args.source)
+        )
+        count = append_events(destination, events)
+        if args.verbose:
+            print(f"captured {count} event(s) -> {destination}", file=sys.stderr)
+        return 0
+
     if args.command == "ingest":
         events = load_jsonl(args.input)
         with EventStore(args.db) as store:
             result = store.add_events(events)
-        print(
-            f"ingested: {result.inserted} inserted, {result.skipped} duplicate(s) skipped"
-        )
+        print(f"ingested: {result.inserted} inserted, {result.skipped} duplicate(s) skipped")
         return 0
 
     if args.command == "report":
@@ -107,6 +581,9 @@ def _run(args: argparse.Namespace) -> int:
             print(f"{project_id}\t{event_count}")
         return 0
 
+    if args.command == "admin":
+        return _run_admin(args)
+
     raise AssertionError(f"unhandled command: {args.command}")
 
 
@@ -115,7 +592,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         return _run(args)
-    except (InputError, OSError, ValueError) as exc:
+    except (
+        AdminServerError,
+        AdminStorageError,
+        BundleError,
+        HookCaptureError,
+        InputError,
+        OSError,
+        SubmissionError,
+        ValueError,
+    ) as exc:
         parser.exit(2, f"error: {exc}\n")
 
 

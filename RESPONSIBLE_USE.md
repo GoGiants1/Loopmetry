@@ -8,6 +8,7 @@ Appropriate early uses include:
 
 - a developer reviewing their own agent-assisted project;
 - a team retrospective with informed participant consent;
+- collecting training-project submissions with a disclosed roster and review process;
 - checking whether specifications, tests, and commits are traceable;
 - comparing two workflow configurations on the same controlled task;
 - identifying missing verification or evidence coverage; and
@@ -27,7 +28,7 @@ Do not use Loopmetry as the sole or primary input for:
 
 ## Required human review
 
-Every metric is conditional on adapter coverage and recorded evidence. Before acting on a report, a reviewer should verify:
+Every metric and administrator submission view is conditional on adapter coverage and recorded evidence. Before acting on a report, a reviewer should verify:
 
 1. which repositories and sessions were observed;
 2. whether requirements and verification events were captured correctly;
@@ -55,3 +56,8 @@ Before deployment beyond personal use, establish:
 - a process for correcting adapter errors;
 - project-type calibration; and
 - independent review of metric validity and unintended incentives.
+
+
+## Training and submission deployments
+
+Administrators should publish the submission fields, review states, deadline, retention period, and correction process before participants begin. `not_submitted`, `needs_revision`, and `accepted` are workflow states, not statements about a person's ability. Participants should be able to inspect their local report and the exact `submission.json` before upload.

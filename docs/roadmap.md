@@ -1,94 +1,110 @@
 # Roadmap
 
-## Milestone 0 — evidence evaluator vertical slice
+## Milestone 0 — deterministic evaluator vertical slice
 
-Status: implemented in the initial repository scaffold.
+Status: implemented.
 
-- canonical event schema;
-- JSONL validation;
-- SQLite evidence store;
-- deterministic metric cards;
-- confidence and measurement gaps;
-- Markdown, JSON, and self-contained HTML reports;
-- demo events and unit tests; and
-- `uv`-managed development and CI environment.
+- canonical event schema and validation;
+- local SQLite evidence store;
+- independent metric cards;
+- evidence IDs, confidence, and measurement gaps;
+- Markdown, JSON, and standalone HTML reports;
+- bounded LLM bundle contract;
+- `uv` environment and lockfile; and
+- synthetic fixtures and tests.
 
-## Milestone 1 — local session adapters and capture
+## Milestone 1 — participant command and administrator collection
 
-Priority order:
+Status: implemented in v0.3.
 
-1. Claude Code hook payload and JSONL adapter;
-2. Codex hook payload and interactive-session rollout adapter;
-3. Cursor event/history adapter;
-4. OpenCode adapter; and
-5. generic OpenTelemetry-style ingestion.
+- `loopmetry run` one-command local analysis and packaging;
+- narrow automatic discovery of Loopmetry hook files;
+- content-addressed submission envelope v1;
+- retry-safe `loopmetry submit`;
+- roster enrollment and token rotation;
+- CSV roster import and private credential export;
+- idempotent participant upload API;
+- repeated-attempt history;
+- manual review state and note history;
+- complete-roster HTML dashboard, including non-submitters;
+- JSON administrator APIs and CSV export; and
+- loopback-first deployment and authentication safeguards.
 
-The preferred integration is an official lifecycle hook that supplies `session_id`, `transcript_path`, and `cwd`. Directory scanning is a fallback for existing sessions.
+## Milestone 2 — source capture and backfill
 
-Each adapter must publish a coverage matrix showing which canonical events can be emitted reliably, plus parser version, source version, warnings, and unparsed event counts.
+- reviewed hook-configuration generator for Claude Code;
+- reviewed hook-configuration generator for Codex;
+- Claude Code historical-session adapter;
+- Codex rollout backfill adapter;
+- adapter checkpoints and incremental import;
+- source/adapter version and coverage matrix; and
+- unparsed-record diagnostics.
 
-## Milestone 2 — project evidence graph
+Hooks remain the preferred live path. Home-directory transcript scanning must always be explicit and bounded.
+
+## Milestone 3 — project evidence graph
 
 - requirement and acceptance-criterion import;
 - Spec → Task → File → Test → Commit edges;
 - Git history correlation;
 - issue and pull-request correlation;
-- evidence graph export; and
-- requirement-level completion reports.
+- requirement-level completion reports; and
+- evidence graph export.
 
-## Milestone 3 — project-volume calibration
+## Milestone 4 — project-volume calibration and human evaluation
 
-Raw counts are not comparable across a small bug fix and a multi-week application. Planned work:
-
-- project size descriptors;
+- project-size descriptors;
 - changed-file and language normalization;
-- session-duration and active-time estimates;
+- active-time and repository coverage estimates;
 - task-complexity buckets;
-- repository coverage reporting; and
-- metric confidence adjusted by observed volume.
-
-## Milestone 4 — optional local-CLI LLM judges
-
-- bounded and content-addressed evaluation bundles;
-- outbound payload preview and allowlist-based redaction;
-- versioned rubric and JSON Schema contracts;
-- Codex CLI provider using ephemeral, read-only structured-output runs;
-- Claude Code CLI provider using bare, non-persistent, tool-free structured-output runs;
-- provider probing, typed failures, usage and cost metadata;
-- separation of factual metrics from LLM judgments; and
-- cross-provider and repeated-judge disagreement reporting.
-
-See `docs/llm-evaluation.md`.
-
-## Milestone 5 — evaluation and calibration framework
-
 - benchmark project manifests;
-- expected evidence assertions;
-- regression fixtures for adapters, metrics, bundles, and providers;
-- synthetic adversarial traces and prompt-injection fixtures;
-- project-level ground-truth annotations;
-- human-evaluation forms;
-- inter-rater agreement and judge calibration reports; and
-- threshold and weight sensitivity analysis.
+- consented human annotations;
+- inter-rater agreement and sensitivity analysis; and
+- documented metric failure cases.
 
-## Milestone 6 — local React dashboard
+## Milestone 5 — richer administrator operations
 
-The static HTML report is already implemented. The React milestone adds:
+- assignment deadlines and late markers;
+- batch token rotation and participant deactivation;
+- signed receipts;
+- server migrations and backup tooling;
+- reverse-proxy deployment examples;
+- role-based reviewer access or SSO; and
+- retention/deletion controls.
 
-- project timeline;
-- evidence graph viewer;
-- metric and LLM-judgment drill-down;
-- session and requirement filters;
-- outbound payload preview;
-- exportable retrospective; and
-- no-network default.
+## Milestone 6 — React cohort and evidence explorer
+
+Introduce `web/` only when interaction exceeds the server-rendered HTML surface:
+
+- large-cohort filtering and virtualization;
+- project timeline and evidence graph traversal;
+- requirement/session/repository filters;
+- multi-attempt and controlled-run comparison;
+- reviewer queues and annotations; and
+- exportable retrospectives.
+
+Python remains authoritative for ingestion, policy, metrics, and persistence. React consumes versioned JSON contracts.
+
+## Milestone 7 — optional LLM judgment providers
+
+This is deliberately later than capture, submission operations, and calibration.
+
+- provider protocol and capability probe;
+- remote Claude/Codex judge adapters;
+- fresh, isolated, tool-free evaluation sessions;
+- evidence-citation validation;
+- model/provider/run provenance;
+- cross-provider disagreement reporting; and
+- optional on-device provider adapters after the remote contract stabilizes.
+
+Local LLM execution is not implemented in the current milestone; only extension schemas and bounded bundles are retained.
 
 ## Explicit non-goals before 1.0
 
-- employee ranking;
-- hiring or termination decisions;
+- employee or participant ranking;
+- hiring, termination, compensation, or promotion decisions;
 - covert monitoring;
 - a universal developer score;
-- reverse-engineering a proprietary competitor's scoring algorithm;
-- sending raw transcripts to a hosted service by default; and
-- describing a locally installed provider CLI as on-device inference.
+- reverse-engineering a proprietary competitor’s rubric;
+- raw transcript upload by default; and
+- silently invoking an LLM during participant submission.

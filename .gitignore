@@ -14,3 +14,5 @@ venv/
 CLAUDE.local.md
 *.llm-eval-bundle.json
 *.llm-eval-result.json
+participant-credentials*.csv
+loopmetry-submissions*.csv

@@ -1,5 +1,5 @@
 {
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://github.com/GoGiants1/Loopmetry/schemas/llm-evaluation-v1.schema.json",
   "title": "Loopmetry LLM Evaluation Result v1",
   "type": "object",
@@ -25,19 +25,10 @@
       "maxLength": 120
     },
     "scope": {
-      "enum": [
-        "session",
-        "requirement",
-        "project"
-      ]
+      "enum": ["session", "requirement", "project"]
     },
     "verdict": {
-      "enum": [
-        "pass",
-        "partial",
-        "fail",
-        "indeterminate"
-      ]
+      "enum": ["pass", "partial", "fail", "indeterminate"]
     },
     "summary": {
       "type": "string",
@@ -49,14 +40,14 @@
       "minItems": 1,
       "maxItems": 12,
       "items": {
-        "$ref": "#/$defs/dimension"
+        "$ref": "#/definitions/dimension"
       }
     },
     "risks": {
       "type": "array",
       "maxItems": 30,
       "items": {
-        "$ref": "#/$defs/risk"
+        "$ref": "#/definitions/risk"
       }
     },
     "missing_evidence": {
@@ -72,7 +63,7 @@
       "type": "boolean"
     }
   },
-  "$defs": {
+  "definitions": {
     "evidenceIds": {
       "type": "array",
       "uniqueItems": true,
@@ -108,17 +99,10 @@
           "maxLength": 120
         },
         "assessability": {
-          "enum": [
-            "assessable",
-            "partially_assessable",
-            "not_assessable"
-          ]
+          "enum": ["assessable", "partially_assessable", "not_assessable"]
         },
         "rating": {
-          "type": [
-            "integer",
-            "null"
-          ],
+          "type": ["integer", "null"],
           "minimum": 0,
           "maximum": 4
         },
@@ -133,10 +117,10 @@
           "maxLength": 2000
         },
         "evidence_ids": {
-          "$ref": "#/$defs/evidenceIds"
+          "$ref": "#/definitions/evidenceIds"
         },
         "counterevidence_ids": {
-          "$ref": "#/$defs/evidenceIds"
+          "$ref": "#/definitions/evidenceIds"
         },
         "missing_evidence": {
           "type": "array",
@@ -147,51 +131,15 @@
             "maxLength": 500
           }
         }
-      },
-      "allOf": [
-        {
-          "if": {
-            "properties": {
-              "assessability": {
-                "const": "not_assessable"
-              }
-            }
-          },
-          "then": {
-            "properties": {
-              "rating": {
-                "type": "null"
-              }
-            }
-          },
-          "else": {
-            "properties": {
-              "rating": {
-                "type": "integer",
-                "minimum": 0,
-                "maximum": 4
-              }
-            }
-          }
-        }
-      ]
+      }
     },
     "risk": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "severity",
-        "description",
-        "evidence_ids"
-      ],
+      "required": ["severity", "description", "evidence_ids"],
       "properties": {
         "severity": {
-          "enum": [
-            "low",
-            "medium",
-            "high",
-            "critical"
-          ]
+          "enum": ["low", "medium", "high", "critical"]
         },
         "description": {
           "type": "string",
@@ -199,7 +147,7 @@
           "maxLength": 1000
         },
         "evidence_ids": {
-          "$ref": "#/$defs/evidenceIds"
+          "$ref": "#/definitions/evidenceIds"
         }
       }
     }

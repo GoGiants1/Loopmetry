@@ -1,43 +1,66 @@
 # Privacy
 
-## Current data flow
+## Participant-side data flow
 
-The Loopmetry v0.1 core:
+Loopmetry capture, normalization, deterministic evaluation, local SQLite storage, and report rendering run on the participant’s machine without telemetry.
 
-- reads normalized JSONL events from a local file;
-- optionally stores those events in a local SQLite database;
-- calculates metrics locally;
-- writes reports locally; and
-- makes no network requests and includes no telemetry.
+`loopmetry run` writes local artifacts under `.loopmetry/runs/<run-id>/`. A network request occurs only when the participant configures `--server` or `LOOPMETRY_SERVER_URL`.
 
-The default database path is `.loopmetry/loopmetry.db` inside the current working directory.
+## Submission v1 data
 
-## Data accepted by the core
+The administrator receives a content-addressed envelope containing:
 
-The canonical schema can contain local file paths, requirement summaries, command text, error messages, commit hashes, and short evidence summaries. Depending on the project, these values can still reveal confidential information.
+- assignment, roster, project, run, and Loopmetry version identifiers;
+- event/session/source counts and the observed time window;
+- deterministic project report;
+- evidence IDs and privacy-minimized evidence summaries;
+- metric confidence and measurement gaps; and
+- explicit privacy declarations.
 
-The metric engine does not require:
+Submission v1 does not contain:
 
-- raw user prompts;
-- agent response text;
-- source-code bodies;
-- API keys or credentials;
-- Git author email addresses;
-- customer records; or
-- remote repository URLs.
+- raw Claude Code or Codex transcripts;
+- raw prompts or full model responses;
+- canonical event records;
+- source-code bodies or complete diffs;
+- raw environment variables or credentials;
+- Git author email or remote repository URL; or
+- absolute source path prefixes.
 
-Adapters should omit those fields by default.
+Evidence summaries can still contain confidential project terms. Capture adapters therefore use allowlisted fields and bounded summaries, and organizations should use only authorized training or project data.
 
-## User responsibilities
+## Identity and roster data
 
-Users and organizations are responsible for:
+The administrator database may contain:
 
-- ensuring they are authorized to process the project evidence;
-- selecting an appropriate storage location and file permissions;
-- applying retention and deletion policies;
-- avoiding accidental commits of `.loopmetry/` and generated reports; and
-- reviewing adapter-specific data collection before enabling it.
+- assignment and submitter identifiers;
+- optional display name;
+- token digest and non-secret hint;
+- submission attempts and timestamps;
+- manual review status and reviewer notes; and
+- validated submission envelopes.
 
-## Future network features
+Plain participant tokens are returned only during enrollment and are not stored. Credentials exports contain sensitive bearer tokens and are written with private permissions; administrators must distribute and delete them securely.
 
-Any future hosted sync or external narrative provider must be optional, disabled by default, and documented separately. A compliant implementation should provide a preflight view of the exact payload, an allowlist-based field policy, explicit retention settings, and deletion/export controls.
+## Administrator responsibilities
+
+The operator of the collection service is responsible for:
+
+- providing participant notice;
+- establishing an appropriate data-processing basis;
+- limiting access to roster, submission, and review data;
+- configuring HTTPS for network submission;
+- defining retention, export, correction, and deletion procedures;
+- protecting backups and CSV exports;
+- rotating credentials after suspected exposure; and
+- avoiding employment or covert-monitoring uses prohibited by `RESPONSIBLE_USE.md`.
+
+## Local files
+
+`.loopmetry/`, administrator databases, generated reports, receipts, and credentials CSVs are ignored by the repository. Users should also apply OS-level access controls and avoid syncing sensitive artifacts to unmanaged storage.
+
+## LLM extension
+
+No model is invoked during capture, `run`, upload, ingestion, or administrator review in the current milestone.
+
+The bounded LLM bundle remains a future extension contract. Any later provider must make the exact outbound payload, provider, model, inference location, retention, and cost explicit. Local/on-device LLM runtime support is deferred.

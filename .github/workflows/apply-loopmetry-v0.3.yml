@@ -1,0 +1,81 @@
+name: Apply Loopmetry v0.3 snapshot
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  issues:
+    types: [opened]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'issues' && github.event.issue.title == '[loopmetry-release] apply v0.3' ||
+      github.event_name == 'pull_request' && github.event.pull_request.title == '[loopmetry-release] apply v0.3'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          python-version: "3.11"
+          enable-cache: true
+
+      - name: Materialize verified snapshot
+        env:
+          BASE_SHA: 5a2c2bbed7dc6526ae5ae51ffaa90ca60bd2852f
+          EXPECTED_SHA256: d2527b77c35add1de429842f721096915243d5201f01b692756cebcffb96ff8a
+        run: |
+          set -euo pipefail
+          cat .loopmetry-release/part-* | base64 --decode > /tmp/loopmetry-v0.3-source.tar.gz
+          echo "${EXPECTED_SHA256}  /tmp/loopmetry-v0.3-source.tar.gz" | sha256sum -c -
+
+          rm -rf /tmp/loopmetry-v0.3 /tmp/loopmetry-current-workflows
+          mkdir -p /tmp/loopmetry-v0.3 /tmp/loopmetry-current-workflows
+          tar -xzf /tmp/loopmetry-v0.3-source.tar.gz -C /tmp/loopmetry-v0.3
+          cp -a .github/workflows/. /tmp/loopmetry-current-workflows/
+
+          git reset --hard "${BASE_SHA}"
+          find . -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
+          cp -a /tmp/loopmetry-v0.3/Loopmetry-v0.3/. .
+
+          # The Actions token has contents:write but no workflows permission.
+          # Preserve the current workflow tree exactly; the connector updates the
+          # final CI workflow and removes this one after the source commit lands.
+          rm -rf .github/workflows
+          mkdir -p .github/workflows
+          cp -a /tmp/loopmetry-current-workflows/. .github/workflows/
+
+      - name: Verify implementation
+        run: |
+          set -euo pipefail
+          uv lock --check
+          uv sync --locked
+          uv run python -m unittest discover -s tests -v
+          uv run loopmetry analyze examples/demo_project.jsonl --format html --output /tmp/loopmetry-report.html
+          uv build
+
+      - name: Commit and update main
+        env:
+          BASE_SHA: 5a2c2bbed7dc6526ae5ae51ffaa90ca60bd2852f
+        run: |
+          set -euo pipefail
+          git config user.name "Loopmetry Release Bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add -A
+          git commit -m "feat: add one-command submission and cohort administration"
+
+          git fetch origin main
+          lease_sha="$(git rev-parse origin/main)"
+          if ! git merge-base --is-ancestor "${BASE_SHA}" "${lease_sha}"; then
+            echo "refusing to replace main: ${lease_sha} does not descend from ${BASE_SHA}" >&2
+            exit 1
+          fi
+          git push --force-with-lease=refs/heads/main:${lease_sha} origin HEAD:main

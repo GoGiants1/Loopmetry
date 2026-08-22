@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-from collections import Counter, defaultdict
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from typing import Iterable, Mapping, Sequence
+from datetime import datetime
+from typing import Mapping
 
-from .schema import Event, EventType
+from .schema import Event
 
 
 def _clamp(value: float, lower: float = 0.0, upper: float = 1.0) -> float:
