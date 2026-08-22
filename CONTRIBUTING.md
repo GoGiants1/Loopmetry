@@ -5,11 +5,11 @@
 ```bash
 git clone https://github.com/GoGiants1/Loopmetry.git
 cd Loopmetry
-python -m pip install -e .
-python -m unittest discover -s tests -v
+uv sync --all-groups
+uv run python -m unittest discover -s tests -v
 ```
 
-Runtime code should remain standard-library-only unless a dependency has a clear security, maintenance, and portability justification.
+Use `uv` for Python versions, environments, dependency groups, locking, running tools, and builds. Runtime code should remain standard-library-only unless a dependency has a clear security, maintenance, and portability justification.
 
 ## Design requirements
 
@@ -49,3 +49,19 @@ A metric proposal must include:
 ## Pull requests
 
 Keep changes focused and include tests. For user-visible changes, update the relevant document in `docs/` and the example report workflow when applicable.
+
+
+## Dependency changes
+
+Update `pyproject.toml`, run `uv lock`, and commit `uv.lock`. Verify with:
+
+```bash
+uv lock --check
+uv sync --locked --all-groups
+```
+
+Do not add `requirements.txt`, Poetry, pip-tools, or a separately managed virtual environment.
+
+## Coding-agent instructions
+
+`AGENTS.md` is the shared source of repository instructions. `CLAUDE.md` imports it so Codex and Claude Code receive the same rules. Keep the shared instructions concrete, current, and consistent with the architecture and responsible-use documents.

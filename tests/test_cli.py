@@ -31,6 +31,11 @@ class CliTests(unittest.TestCase):
         self.assertIn('"project_id": "demo-expense-cli"', analyzed.stdout)
         self.assertNotIn("overall_score", analyzed.stdout)
 
+        visualized = self.run_cli("analyze", source, "--format", "html")
+        self.assertEqual(visualized.returncode, 0, visualized.stderr)
+        self.assertTrue(visualized.stdout.startswith("<!doctype html>"))
+        self.assertIn('id="loopmetry-report"', visualized.stdout)
+
     def test_ingest_and_report(self) -> None:
         source = str(ROOT / "examples" / "demo_project.jsonl")
         with tempfile.TemporaryDirectory() as directory:

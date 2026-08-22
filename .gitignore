@@ -11,3 +11,6 @@ venv/
 .pytest_cache/
 .mypy_cache/
 .DS_Store
+CLAUDE.local.md
+*.llm-eval-bundle.json
+*.llm-eval-result.json

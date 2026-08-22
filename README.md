@@ -35,7 +35,7 @@ Loopmetry is an early vertical slice. It currently provides:
 - deterministic, inspectable metric calculations;
 - evidence references and confidence values for every metric;
 - a local SQLite evidence store;
-- JSON and Markdown reports;
+- JSON, Markdown, and self-contained HTML reports;
 - a zero-network standard-library runtime; and
 - a demo project plus unit tests.
 
@@ -43,28 +43,29 @@ Agent-specific transcript adapters are the next implementation milestone. The cu
 
 ## Quick start
 
-Requirements: Python 3.11 or newer.
+Requirements: `uv` and Python 3.11 or newer. `uv` will create and manage the project environment.
 
 ```bash
 git clone https://github.com/GoGiants1/Loopmetry.git
 cd Loopmetry
-python -m pip install -e .
+uv sync --all-groups
 ```
 
 Validate and analyze the included demo:
 
 ```bash
-loopmetry validate examples/demo_project.jsonl
-loopmetry analyze examples/demo_project.jsonl --format markdown
-loopmetry analyze examples/demo_project.jsonl --format json --output report.json
+uv run loopmetry validate examples/demo_project.jsonl
+uv run loopmetry analyze examples/demo_project.jsonl --format markdown
+uv run loopmetry analyze examples/demo_project.jsonl --format json --output report.json
+uv run loopmetry analyze examples/demo_project.jsonl --format html --output report.html
 ```
 
 Persist evidence locally and generate the report later:
 
 ```bash
-loopmetry ingest examples/demo_project.jsonl
-loopmetry projects
-loopmetry report demo-expense-cli --format markdown --output report.md
+uv run loopmetry ingest examples/demo_project.jsonl
+uv run loopmetry projects
+uv run loopmetry report demo-expense-cli --format markdown --output report.md
 ```
 
 The default database is `.loopmetry/loopmetry.db`. Override it with `--db`.
@@ -106,7 +107,7 @@ Loopmetry deliberately does not produce a universal developer score. Metrics hav
 
 ### Deterministic core
 
-The evaluator does not require an LLM. The same event set produces the same metric values. A future narrative layer may be added, but it will remain optional and separate from metric computation.
+The evaluator does not require an LLM. The same event set produces the same metric values. An optional LLM judge is planned as a separate, versioned interpretation layer; it will never replace the deterministic measurements.
 
 ### Local by default
 
@@ -116,6 +117,17 @@ The current runtime makes no network calls and includes no telemetry. SQLite and
 
 Missing requirements, plans, verification events, commits, or adapter provenance lower confidence or appear explicitly as measurement gaps. Missing evidence is never silently converted into a claim about quality.
 
+
+## Visualization
+
+`--format html` writes a portable report with inline CSS, inline JavaScript, metric drill-down, evidence references, confidence, and measurement gaps. It does not load a CDN or make a network request. This static report is the default visualization surface while the evidence graph and comparison workflows stabilize. A React application is planned only for interactions that need a long-lived local service, such as timeline filtering, evidence-graph traversal, multi-run comparison, and outbound LLM-payload preview. See [`docs/dashboard.md`](docs/dashboard.md).
+
+## Optional LLM evaluation
+
+The planned LLM layer will build a bounded, allowlisted evidence bundle and invoke the user's locally installed Codex or Claude Code CLI with structured output. A local CLI is only the transport and authentication surface: inference may still be remote, so outbound data must be previewed and explicitly approved. Codex OSS mode can be offered separately for Ollama or LM Studio, with the actual backend recorded in the judge run.
+
+The design keeps judge output separate from deterministic metrics, runs judges in fresh read-only ephemeral sessions, and requires evidence IDs, counterevidence, confidence, missing evidence, and human-review flags. See [`docs/llm-evaluation.md`](docs/llm-evaluation.md), [`rubrics/project-work-v1.md`](rubrics/project-work-v1.md), and [`schemas/llm-evaluation-v1.schema.json`](schemas/llm-evaluation-v1.schema.json).
+
 ## Repository layout
 
 ```text
@@ -124,14 +136,22 @@ src/loopmetry/
   io.py           JSONL loading and project selection
   storage.py      local SQLite evidence store
   evaluation.py   deterministic project metrics
-  report.py       Markdown and JSON rendering
+  report.py       JSON, Markdown, and self-contained HTML rendering
   cli.py          command-line interface
+
+AGENTS.md             shared coding-agent instructions
+CLAUDE.md              imports AGENTS.md for Claude Code
 
 docs/
   architecture.md
   event-schema.md
+  dashboard.md
+  llm-evaluation.md
   metrics.md
   roadmap.md
+
+rubrics/               versioned LLM evaluation rubrics
+schemas/               stable machine-readable contracts
 ```
 
 ## Safety and responsible use
@@ -149,9 +169,12 @@ It is not designed for automated hiring, termination, compensation, promotion, e
 ## Development
 
 ```bash
-python -m unittest discover -s tests -v
-python -m loopmetry validate examples/demo_project.jsonl
-python -m loopmetry analyze examples/demo_project.jsonl --format json
+uv sync --all-groups
+uv run python -m unittest discover -s tests -v
+uv run loopmetry validate examples/demo_project.jsonl
+uv run loopmetry analyze examples/demo_project.jsonl --format json
+uv run loopmetry analyze examples/demo_project.jsonl --format html --output /tmp/loopmetry-report.html
+uv build
 ```
 
 The package has no runtime dependencies outside the Python standard library.

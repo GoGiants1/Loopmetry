@@ -1,11 +1,11 @@
-"""Render Loopmetry reports as JSON or Markdown."""
+"""Render Loopmetry reports as JSON, Markdown, or self-contained HTML."""
 
 from __future__ import annotations
 
 import json
-from typing import Iterable
 
 from .evaluation import MetricResult, ProjectReport
+from .html_report import _safe_embedded_json, render_html
 
 
 def render_json(report: ProjectReport) -> str:
@@ -100,4 +100,6 @@ def render(report: ProjectReport, output_format: str) -> str:
         return render_json(report)
     if normalized in {"md", "markdown"}:
         return render_markdown(report)
+    if normalized in {"html", "htm"}:
+        return render_html(report)
     raise ValueError(f"unsupported output format: {output_format}")

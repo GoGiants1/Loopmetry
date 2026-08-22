@@ -45,7 +45,7 @@ def _build_parser() -> argparse.ArgumentParser:
     analyze.add_argument("input", help="Path to normalized JSONL events.")
     analyze.add_argument("--project-id", help="Project ID when the file contains multiple projects.")
     analyze.add_argument(
-        "--format", choices=("markdown", "json"), default="markdown"
+        "--format", choices=("markdown", "json", "html"), default="markdown"
     )
     analyze.add_argument("--output", help="Output path; use '-' or omit for stdout.")
 
@@ -57,7 +57,7 @@ def _build_parser() -> argparse.ArgumentParser:
     report.add_argument("project_id", help="Project ID stored in SQLite.")
     report.add_argument("--db", default=str(DEFAULT_DB), help="SQLite database path.")
     report.add_argument(
-        "--format", choices=("markdown", "json"), default="markdown"
+        "--format", choices=("markdown", "json", "html"), default="markdown"
     )
     report.add_argument("--output", help="Output path; use '-' or omit for stdout.")
 

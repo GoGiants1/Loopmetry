@@ -9,20 +9,23 @@ Status: implemented in the initial repository scaffold.
 - SQLite evidence store;
 - deterministic metric cards;
 - confidence and measurement gaps;
-- Markdown and JSON reports;
-- demo events and unit tests.
+- Markdown, JSON, and self-contained HTML reports;
+- demo events and unit tests; and
+- `uv`-managed development and CI environment.
 
-## Milestone 1 — source adapters
+## Milestone 1 — local session adapters and capture
 
 Priority order:
 
-1. Claude Code JSONL adapter;
-2. Codex interactive-session adapter;
+1. Claude Code hook payload and JSONL adapter;
+2. Codex hook payload and interactive-session rollout adapter;
 3. Cursor event/history adapter;
 4. OpenCode adapter; and
 5. generic OpenTelemetry-style ingestion.
 
-Each adapter should publish a coverage matrix showing which canonical events can be emitted reliably.
+The preferred integration is an official lifecycle hook that supplies `session_id`, `transcript_path`, and `cwd`. Directory scanning is a fallback for existing sessions.
+
+Each adapter must publish a coverage matrix showing which canonical events can be emitted reliably, plus parser version, source version, warnings, and unparsed event counts.
 
 ## Milestone 2 — project evidence graph
 
@@ -44,22 +47,39 @@ Raw counts are not comparable across a small bug fix and a multi-week applicatio
 - repository coverage reporting; and
 - metric confidence adjusted by observed volume.
 
-## Milestone 4 — evaluation framework
+## Milestone 4 — optional local-CLI LLM judges
+
+- bounded and content-addressed evaluation bundles;
+- outbound payload preview and allowlist-based redaction;
+- versioned rubric and JSON Schema contracts;
+- Codex CLI provider using ephemeral, read-only structured-output runs;
+- Claude Code CLI provider using bare, non-persistent, tool-free structured-output runs;
+- provider probing, typed failures, usage and cost metadata;
+- separation of factual metrics from LLM judgments; and
+- cross-provider and repeated-judge disagreement reporting.
+
+See `docs/llm-evaluation.md`.
+
+## Milestone 5 — evaluation and calibration framework
 
 - benchmark project manifests;
 - expected evidence assertions;
-- regression fixtures for adapters and metrics;
-- synthetic adversarial traces;
+- regression fixtures for adapters, metrics, bundles, and providers;
+- synthetic adversarial traces and prompt-injection fixtures;
 - project-level ground-truth annotations;
-- human-evaluation forms; and
-- agreement and calibration reports.
+- human-evaluation forms;
+- inter-rater agreement and judge calibration reports; and
+- threshold and weight sensitivity analysis.
 
-## Milestone 5 — local dashboard
+## Milestone 6 — local React dashboard
+
+The static HTML report is already implemented. The React milestone adds:
 
 - project timeline;
 - evidence graph viewer;
-- metric drill-down;
+- metric and LLM-judgment drill-down;
 - session and requirement filters;
+- outbound payload preview;
 - exportable retrospective; and
 - no-network default.
 
@@ -69,5 +89,6 @@ Raw counts are not comparable across a small bug fix and a multi-week applicatio
 - hiring or termination decisions;
 - covert monitoring;
 - a universal developer score;
-- reverse-engineering a proprietary competitor's scoring algorithm; and
-- sending raw transcripts to a hosted service by default.
+- reverse-engineering a proprietary competitor's scoring algorithm;
+- sending raw transcripts to a hosted service by default; and
+- describing a locally installed provider CLI as on-device inference.

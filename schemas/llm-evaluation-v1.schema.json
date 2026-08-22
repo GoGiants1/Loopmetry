@@ -1,0 +1,207 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/GoGiants1/Loopmetry/schemas/llm-evaluation-v1.schema.json",
+  "title": "Loopmetry LLM Evaluation Result v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "rubric_id",
+    "scope",
+    "verdict",
+    "summary",
+    "dimensions",
+    "risks",
+    "missing_evidence",
+    "needs_human_review"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "0.1"
+    },
+    "rubric_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 120
+    },
+    "scope": {
+      "enum": [
+        "session",
+        "requirement",
+        "project"
+      ]
+    },
+    "verdict": {
+      "enum": [
+        "pass",
+        "partial",
+        "fail",
+        "indeterminate"
+      ]
+    },
+    "summary": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2000
+    },
+    "dimensions": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 12,
+      "items": {
+        "$ref": "#/$defs/dimension"
+      }
+    },
+    "risks": {
+      "type": "array",
+      "maxItems": 30,
+      "items": {
+        "$ref": "#/$defs/risk"
+      }
+    },
+    "missing_evidence": {
+      "type": "array",
+      "maxItems": 30,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 500
+      }
+    },
+    "needs_human_review": {
+      "type": "boolean"
+    }
+  },
+  "$defs": {
+    "evidenceIds": {
+      "type": "array",
+      "uniqueItems": true,
+      "maxItems": 100,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 200
+      }
+    },
+    "dimension": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "key",
+        "label",
+        "assessability",
+        "rating",
+        "confidence",
+        "rationale",
+        "evidence_ids",
+        "counterevidence_ids",
+        "missing_evidence"
+      ],
+      "properties": {
+        "key": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]{1,63}$"
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "assessability": {
+          "enum": [
+            "assessable",
+            "partially_assessable",
+            "not_assessable"
+          ]
+        },
+        "rating": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 4
+        },
+        "confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "rationale": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000
+        },
+        "evidence_ids": {
+          "$ref": "#/$defs/evidenceIds"
+        },
+        "counterevidence_ids": {
+          "$ref": "#/$defs/evidenceIds"
+        },
+        "missing_evidence": {
+          "type": "array",
+          "maxItems": 20,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "assessability": {
+                "const": "not_assessable"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "rating": {
+                "type": "null"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "rating": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4
+              }
+            }
+          }
+        }
+      ]
+    },
+    "risk": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "severity",
+        "description",
+        "evidence_ids"
+      ],
+      "properties": {
+        "severity": {
+          "enum": [
+            "low",
+            "medium",
+            "high",
+            "critical"
+          ]
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1000
+        },
+        "evidence_ids": {
+          "$ref": "#/$defs/evidenceIds"
+        }
+      }
+    }
+  }
+}
