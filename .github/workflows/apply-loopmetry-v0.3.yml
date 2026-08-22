@@ -60,3 +60,5 @@ jobs:
           git add -A
           git commit -m "feat: add one-command submission and cohort administration"
           git push --force-with-lease=refs/heads/main:${GITHUB_SHA} origin HEAD:main
+
+# retrigger: 2026-08-22T14:35:00Z
