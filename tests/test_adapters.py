@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json as json_module
 import tempfile
 import unittest
 from datetime import datetime, timezone
@@ -23,6 +24,7 @@ from loopmetry.adapters.checkpoints import (
     load_checkpoint,
     save_checkpoint,
 )
+from loopmetry.adapters.hook import HookSourceAdapter
 
 
 def _candidate(candidate_id: str, size: int) -> SourceCandidate:
@@ -120,6 +122,66 @@ class CheckpointPersistenceTests(unittest.TestCase):
             path = checkpoint_path(Path(tmp), "../evil source")
             self.assertTrue(str(path).startswith(tmp))
             self.assertNotIn("..", path.name)
+
+
+def _write_hook_file(root: Path, name: str, events: list[dict]) -> Path:
+    hooks_dir = root / ".loopmetry" / "hooks"
+    hooks_dir.mkdir(parents=True, exist_ok=True)
+    path = hooks_dir / name
+    path.write_text(
+        "".join(json_module.dumps(event) + "\n" for event in events), encoding="utf-8"
+    )
+    return path
+
+
+def _hook_event(event_id: str) -> dict:
+    return {
+        "schema_version": "0.2",
+        "event_id": event_id,
+        "project_id": "proj",
+        "session_id": "sess",
+        "timestamp": "2026-08-23T10:00:00Z",
+        "type": "note",
+        "actor": "system",
+        "source": "claude-code",
+        "data": {"summary": "x"},
+        "provenance": [
+            {"source": "claude-code", "capture_mode": "hook", "adapter_version": "1.0.0"}
+        ],
+    }
+
+
+class HookSourceAdapterTests(unittest.TestCase):
+    def test_discover_orders_deterministically_and_stays_in_project(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_hook_file(root, "codex.jsonl", [_hook_event("b")])
+            _write_hook_file(root, "claude-code.jsonl", [_hook_event("a")])
+            adapter = HookSourceAdapter()
+            context = DiscoveryContext(project_root=root)
+            candidates = adapter.discover(context)
+            self.assertEqual(
+                [candidate.label for candidate in candidates],
+                ["claude-code.jsonl", "codex.jsonl"],
+            )
+
+    def test_import_returns_events_and_coverage(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_hook_file(root, "claude-code.jsonl", [_hook_event("a"), _hook_event("b")])
+            adapter = HookSourceAdapter()
+            context = DiscoveryContext(project_root=root)
+            run = adapter.import_candidates(adapter.discover(context), context)
+            self.assertEqual(len(run.events), 2)
+            self.assertEqual(run.source, "hook")
+            self.assertEqual(run.diagnostics, ())
+            self.assertIn("commands", run.coverage.categories)
+
+    def test_empty_project_discovers_nothing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            adapter = HookSourceAdapter()
+            candidates = adapter.discover(DiscoveryContext(project_root=Path(tmp)))
+            self.assertEqual(candidates, ())
 
 
 if __name__ == "__main__":

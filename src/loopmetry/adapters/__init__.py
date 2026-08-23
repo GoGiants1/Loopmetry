@@ -14,6 +14,7 @@ from .base import (
     SourceAdapter,
     SourceCandidate,
 )
+from .hook import HookSourceAdapter
 
 __all__ = [
     "EVIDENCE_CATEGORIES",
@@ -25,6 +26,7 @@ __all__ = [
     "CoverageReport",
     "Diagnostic",
     "DiscoveryContext",
+    "HookSourceAdapter",
     "ImportPreview",
     "SourceAdapter",
     "SourceCandidate",

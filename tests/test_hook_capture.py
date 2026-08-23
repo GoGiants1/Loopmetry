@@ -7,7 +7,7 @@ from unittest.mock import patch
 from datetime import datetime, timezone
 from pathlib import Path
 
-from loopmetry.hook_capture import append_events, normalize_hook_payload
+from loopmetry.hook_capture import HOOK_ADAPTER_VERSION, append_events, normalize_hook_payload
 from loopmetry.schema import EventType
 
 
@@ -210,6 +210,23 @@ class HookCaptureTests(unittest.TestCase):
             with patch("loopmetry.hook_capture.os.write", return_value=1):
                 with self.assertRaises(OSError):
                     append_events(output, events)
+
+
+class HookProvenanceTests(unittest.TestCase):
+    def test_hook_events_carry_hook_provenance(self) -> None:
+        events = normalize_hook_payload(
+            {
+                "hook_event_name": "SessionStart",
+                "session_id": "sess-1",
+                "cwd": ".",
+            },
+            source="claude-code",
+        )
+        self.assertEqual(len(events), 1)
+        record = events[0].provenance[0]
+        self.assertEqual(record.source, "claude-code")
+        self.assertEqual(record.capture_mode.value, "hook")
+        self.assertEqual(record.adapter_version, HOOK_ADAPTER_VERSION)
 
 
 if __name__ == "__main__":
