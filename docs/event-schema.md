@@ -16,6 +16,19 @@ Loopmetry consumes UTF-8 JSON Lines. Each non-empty line is one event object. Co
 | `source` | string | Adapter provenance, such as `claude-code` or `codex` |
 | `data` | object | Type-specific fields |
 
+## Provenance envelope (planned, milestone 2)
+
+Decision D-011 makes prospective hook capture and retrospective historical backfill first-class source paths behind one adapter contract. To support that, each imported event will additionally carry a `provenance` list alongside `source`. It is a list — not flat fields — because a merged event must keep every provenance record. Each record contains:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `source` | string | Producing adapter, such as `claude-code` or `codex` |
+| `capture_mode` | string | How the observation was obtained: `hook`, `history-backfill`, `explicit-import`, or `deterministically-derived` |
+| `adapter_version` | string | Version of the adapter that produced the record |
+| `source_ref` | object | Optional content-minimized reference to the origin (for example a session-file identity and record index), never a transcript excerpt |
+
+When the same action is observed by more than one path, the merged event accumulates provenance records; conflicting observations surface as `adapter_conflict` diagnostics and lower confidence rather than being silently resolved. Coverage is reported per evidence category at the adapter-run level, not per event. Field names and the schema-version bump will be finalized in the milestone 2 foundation slice; see `docs/architecture.md` and `docs/decision-log.md` D-011.
+
 ## Event types
 
 ### `project_start` / `project_end`

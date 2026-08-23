@@ -30,17 +30,20 @@ Status: implemented in v0.3.
 - JSON administrator APIs and CSV export; and
 - loopback-first deployment and authentication safeguards.
 
-## Milestone 2 — source capture and backfill
+## Milestone 2 — dual-source capture and backfill
 
-- reviewed hook-configuration generator for Claude Code;
-- reviewed hook-configuration generator for Codex;
-- Claude Code historical-session adapter;
-- Codex rollout backfill adapter;
-- adapter checkpoints and incremental import;
-- source/adapter version and coverage matrix; and
-- unparsed-record diagnostics.
+Status: current milestone. See decision D-011: prospective hook capture and retrospective historical backfill are both first-class source paths behind one shared adapter contract, converging on a hybrid `loopmetry run --source auto` participant flow.
 
-Hooks remain the preferred live path. Home-directory transcript scanning must always be explicit and bounded.
+Ordered slices, each an independent PR:
+
+1. **Shared dual-source foundation.** Provider-neutral `SourceAdapter` contract and typed models (discovery context, source candidates, import preview, capabilities, incremental checkpoints, adapter runs, coverage report, unparsed-record diagnostics) plus per-event source/capture-mode/adapter-version/coverage provenance (`hook`, `history-backfill`, `explicit-import`, `deterministically-derived`). No behavior change to the existing hook path beyond conforming to the contract.
+2. **Claude Code historical backfill.** Bounded session discovery (project root, repository identity, session cwd, and an explicit time window), preview with session/event counts and data-size estimate, version-aware parsing, incremental import: `loopmetry history discover|preview|import --source claude-code`. Unattributed or unparsed records become explicit diagnostics, never silent drops.
+3. **Claude Code hook integration.** `loopmetry integrate claude-code --preview|--apply|--remove` with diff preview, backup, and a `--force` overwrite policy. Integration is recommended prospective capture, not a prerequisite for analysis.
+4. **Hybrid auto mode.** `loopmetry run --source auto`: merge hook, explicit, and consented history evidence; deduplicate with provenance preserved; surface `adapter_conflict` diagnostics and a coverage summary. Interactive terminals preview history candidates and ask before import; non-interactive runs use hook and explicit input only unless `--include-history` is passed.
+5. **Codex parity.** Codex historical adapter, Codex hook integration, source/adapter version and coverage matrix, hybrid merge tests.
+6. **Participant report source coverage.** Report sections for sources observed, sessions included and excluded, hook-versus-backfill coverage per evidence category, unknown records, conflicts, analysis window, and adapter-caused evidence gaps.
+
+Hooks remain the preferred live path. Home-directory transcript scanning must always be explicit, previewed, and bounded; raw transcripts stay local and outside submission v1.
 
 ## Milestone 3 — project evidence graph
 

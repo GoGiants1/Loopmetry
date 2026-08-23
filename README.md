@@ -158,7 +158,7 @@ loopmetry capture-hook --source claude-code --project-id my-project
 loopmetry capture-hook --source codex --project-id my-project
 ```
 
-The hook command reads one JSON payload from standard input, removes raw prompt/source/command bodies, and appends normalized events under `<project>/.loopmetry/hooks/`. Hook installation is currently explicit so administrators can review the exact configuration diff. Historical transcript backfill and automated integration setup remain on the roadmap.
+The hook command reads one JSON payload from standard input, removes raw prompt/source/command bodies, and appends normalized events under `<project>/.loopmetry/hooks/`. Hook installation is currently explicit so administrators can review the exact configuration diff. Consented historical transcript backfill and automated integration setup are the current milestone (see `docs/roadmap.md` milestone 2 and `docs/decision-log.md` D-011): hook capture and historical backfill are both first-class source paths behind one adapter contract, converging on a hybrid `loopmetry run --source auto` flow.
 
 See [`docs/hook-capture.md`](docs/hook-capture.md).
 

@@ -22,6 +22,7 @@ Statuses:
 | D-008 | 2026-08-22 | Accepted | Local LLM execution is deferred; preserve only extension contracts |
 | D-009 | 2026-08-22 | Accepted | Submission retries are idempotent and review status is manual |
 | D-010 | 2026-08-22 | Accepted | Keep agent instructions navigational; store rationale in this decision log |
+| D-011 | 2026-08-23 | Accepted | Prospective hook capture and retrospective historical backfill are both first-class source paths |
 
 ---
 
@@ -104,6 +105,22 @@ Statuses:
 **Decision:** `AGENTS.md` contains mission boundaries, source-of-truth routing, stable invariants, verification commands, and documentation discipline. Detailed design belongs in task documents; enduring rationale and direction changes belong in this log.
 **Consequences:** Future agents start from `AGENTS.md`, use this log for “why,” and inspect code/tests for implementation truth. Superseded decisions remain visible.
 **Related:** `AGENTS.md`, `docs/architecture.md`, `docs/roadmap.md`
+
+## D-011 — Support both prospective hook capture and retrospective historical backfill
+
+**Status:** Accepted
+**Context:** Hook capture provides privacy-minimized, relatively format-stable forward collection, but it cannot recover work performed before integration. Historical backfill enables zero-setup analysis and recovery of existing Claude Code and Codex sessions, but depends on versioned vendor formats and requires explicit consent for local transcript access.
+**Decision:** Hook capture and historical backfill are both first-class source adapters behind one shared `SourceAdapter` contract, and both produce the same canonical event schema. The default participant experience will eventually be a hybrid `loopmetry run --source auto` mode that merges approved hook and history evidence.
+**Consequences:**
+
+- neither source path may implement metric semantics;
+- every imported event carries source, capture-mode, adapter-version, coverage, and diagnostic provenance (capture modes distinguish at least `hook`, `history-backfill`, `explicit-import`, and `deterministically-derived`);
+- overlapping events are deduplicated without discarding provenance; conflicting observations are never silently resolved — they surface as `adapter_conflict` diagnostics and reduce confidence;
+- home-directory history discovery is bounded, previewable, and consented; non-interactive runs never read history implicitly;
+- raw transcripts are read locally in streaming fashion, are never copied wholesale, and remain excluded from submission v1; and
+- hook integration is recommended for prospective capture quality but is not required for analysis.
+
+**Related:** `docs/architecture.md`, `docs/hook-capture.md`, `docs/roadmap.md`, `docs/submission-workflow.md`, `src/loopmetry/hook_capture.py`, future `src/loopmetry/adapters/`
 
 ---
 

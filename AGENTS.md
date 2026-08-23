@@ -6,7 +6,7 @@ Loopmetry is a local-first, evidence-backed evaluator and submission system for 
 
 Do not introduce participant ranking, employment signals, covert monitoring, or a universal developer score.
 
-The current milestone is the one-command participant flow plus administrator cohort collection. Local/on-device LLM execution is deferred; preserve the extension boundary without adding a model runtime. See `docs/decision-log.md` entries D-007 and D-008.
+The current milestone is dual-source capture: prospective hook capture and retrospective historical backfill behind one shared adapter contract, converging on a hybrid `loopmetry run --source auto` participant flow. The one-command participant flow and administrator cohort collection are implemented. Local/on-device LLM execution is deferred; preserve the extension boundary without adding a model runtime. See `docs/decision-log.md` entries D-007, D-008, and D-011.
 
 ## Start here
 
@@ -29,6 +29,7 @@ Then route by task:
 | Submission package and upload | `docs/submission-workflow.md`, `schemas/submission-v1.schema.json` | `src/loopmetry/submission.py` | `tests/test_submission.py` |
 | Roster, attempts, review status | `docs/submission-workflow.md` | `src/loopmetry/admin_storage.py`, `src/loopmetry/admin_server.py` | `tests/test_admin_storage.py`, `tests/test_admin_server.py` |
 | Claude Code / Codex capture | `docs/hook-capture.md`, `docs/event-schema.md` | `src/loopmetry/hook_capture.py`, `src/loopmetry/schema.py` | `tests/test_hook_capture.py`, `tests/test_schema.py` |
+| Source adapters and historical backfill | `docs/architecture.md`, `docs/hook-capture.md`, `docs/decision-log.md` D-011 | `src/loopmetry/adapters/` (planned; hook path is `src/loopmetry/hook_capture.py` today) | `tests/test_hook_capture.py` (adapter tests planned) |
 | Deterministic evaluation | `docs/metrics.md`, `docs/event-schema.md` | `src/loopmetry/evaluation.py`, `src/loopmetry/metrics_*.py` | `tests/test_evaluation.py` |
 | Reports and visualization | `docs/web-ui.md` | `src/loopmetry/report.py` | `tests/test_report.py` |
 | Future LLM boundary | `docs/llm-evaluation.md`, `schemas/llm-evaluation-*.json`, `rubrics/` | `src/loopmetry/llm_bundle.py` | `tests/test_llm_bundle.py` |
@@ -47,6 +48,7 @@ Do not use prior chat context as the source of truth when repository documents, 
 7. Review status is manual operational metadata and must not be inferred from metric values.
 8. External CLI, JSON, and JSON Schema contracts are versioned. Renderers must not recompute evaluation or review state.
 9. Local/on-device LLM execution is deferred. Do not invoke a model in the participant or administrator path.
+10. Prospective hook capture and retrospective historical backfill are both first-class source paths behind one adapter contract. Imported events carry source, capture-mode, adapter-version, and coverage provenance; overlapping observations merge without losing provenance; conflicts stay visible and lower confidence; history discovery outside the project requires bounded scope, preview, and explicit consent, and non-interactive runs never read history implicitly.
 
 ## Environment and verification
 

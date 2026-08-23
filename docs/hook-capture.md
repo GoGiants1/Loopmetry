@@ -18,6 +18,12 @@ The command reads one JSON object from standard input, writes no standard output
 
 Use `--project-id` to avoid the default pseudonymous ID derived from the working directory. Use `--output` to choose another local JSONL destination.
 
+## Relationship to historical backfill
+
+Hook capture is the recommended prospective path, not a prerequisite for analysis (decision D-011). A consented historical-backfill adapter (planned) can recover existing Claude Code and Codex sessions without prior setup, and a hybrid `loopmetry run --source auto` mode will merge both paths into the same canonical event schema. Installing hooks improves forward capture stability and privacy minimization at the point of collection; skipping them only means analysis relies on backfill or explicit input.
+
+A planned `loopmetry integrate <source> --preview|--apply|--remove` command will generate the configurations below deterministically, previewing before writing and never overwriting an existing file without an explicit force option. Until it ships, use the manual examples that follow.
+
 ## Privacy boundary
 
 The capture adapter deliberately does not retain:
