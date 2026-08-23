@@ -51,6 +51,13 @@ class CoverageReport:
             raise AdapterError(
                 f"unknown coverage categories {unknown}; expected a subset of: {allowed}"
             )
+        invalid = sorted(
+            name for name, value in self.categories.items() if not isinstance(value, Coverage)
+        )
+        if invalid:
+            raise AdapterError(
+                f"coverage values for {invalid} must be Coverage enum members, not raw values"
+            )
         object.__setattr__(self, "categories", dict(self.categories))
 
     @classmethod
@@ -135,6 +142,8 @@ class Checkpoint:
     positions: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        if not isinstance(self.source, str) or not self.source.strip():
+            raise AdapterError("checkpoint source must be a non-empty string")
         object.__setattr__(
             self,
             "positions",

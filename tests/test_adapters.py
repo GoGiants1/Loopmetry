@@ -49,6 +49,10 @@ class CoverageReportTests(unittest.TestCase):
         with self.assertRaises(AdapterError):
             CoverageReport(categories={"vibes": Coverage.FULL})
 
+    def test_non_coverage_value_is_rejected(self) -> None:
+        with self.assertRaises(AdapterError):
+            CoverageReport(categories={"commands": "full"})
+
     def test_categories_are_the_documented_set(self) -> None:
         self.assertIn("verifications", EVIDENCE_CATEGORIES)
         self.assertIn("human_turns", EVIDENCE_CATEGORIES)
@@ -77,6 +81,10 @@ class CheckpointTests(unittest.TestCase):
     def test_rejects_non_mapping_positions(self) -> None:
         with self.assertRaises(AdapterError):
             Checkpoint.from_mapping({"source": "x", "positions": [1, 2]})
+
+    def test_constructor_rejects_blank_source(self) -> None:
+        with self.assertRaises(AdapterError):
+            Checkpoint(source="  ", positions={})
 
 
 class ModelBasicsTests(unittest.TestCase):
@@ -182,6 +190,36 @@ class HookSourceAdapterTests(unittest.TestCase):
             adapter = HookSourceAdapter()
             candidates = adapter.discover(DiscoveryContext(project_root=Path(tmp)))
             self.assertEqual(candidates, ())
+
+    def test_capabilities_exclude_requirements(self) -> None:
+        adapter = HookSourceAdapter()
+        self.assertNotIn("requirements", adapter.capabilities().evidence_categories)
+        self.assertIn("plans", adapter.capabilities().evidence_categories)
+
+    def test_coverage_report_has_no_requirements_key(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_hook_file(root, "claude-code.jsonl", [_hook_event("a")])
+            adapter = HookSourceAdapter()
+            context = DiscoveryContext(project_root=root)
+            run = adapter.import_candidates(adapter.discover(context), context)
+            self.assertNotIn("requirements", run.coverage.categories)
+            self.assertIn("commands", run.coverage.categories)
+
+    def test_until_filters_by_mtime(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = _write_hook_file(root, "claude-code.jsonl", [_hook_event("a")])
+            far_past = datetime(2000, 1, 1, tzinfo=timezone.utc)
+            adapter = HookSourceAdapter()
+            context = DiscoveryContext(project_root=root, until=far_past)
+            candidates = adapter.discover(context)
+            self.assertEqual(candidates, ())
+
+            recent_future = datetime(2100, 1, 1, tzinfo=timezone.utc)
+            context = DiscoveryContext(project_root=root, until=recent_future)
+            candidates = adapter.discover(context)
+            self.assertEqual([candidate.label for candidate in candidates], [path.name])
 
 
 if __name__ == "__main__":

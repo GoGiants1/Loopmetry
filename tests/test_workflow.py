@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from loopmetry.io import InputError
 from loopmetry.submission import load_submission
 from loopmetry.workflow import (
     discover_event_files,
@@ -15,6 +16,28 @@ from loopmetry.workflow import (
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def _write_jsonl(path: Path, events: list[dict]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("".join(json.dumps(event) + "\n" for event in events), encoding="utf-8")
+
+
+def _base_event(**overrides: object) -> dict:
+    event = {
+        "schema_version": "0.2",
+        "event_id": "evt-1",
+        "project_id": "proj",
+        "session_id": "sess",
+        "timestamp": "2026-08-23T10:00:00Z",
+        "type": "note",
+        "actor": "system",
+        "source": "claude-code",
+        "data": {"summary": "x"},
+        "provenance": [],
+    }
+    event.update(overrides)
+    return event
 
 
 class ParticipantWorkflowTests(unittest.TestCase):
@@ -54,6 +77,82 @@ class ParticipantWorkflowTests(unittest.TestCase):
             self.assertEqual(discovered, [first, second])
             events = load_event_files(discovered)
             self.assertEqual(len(events), 20)
+
+    def test_provenance_only_difference_merges_instead_of_aborting(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            first = root / "a.jsonl"
+            second = root / "b.jsonl"
+            _write_jsonl(
+                first,
+                [
+                    _base_event(
+                        provenance=[
+                            {
+                                "source": "claude-code",
+                                "capture_mode": "hook",
+                                "adapter_version": "1.0.0",
+                            }
+                        ]
+                    )
+                ],
+            )
+            _write_jsonl(second, [_base_event(provenance=[])])
+
+            events = load_event_files([first, second])
+            self.assertEqual(len(events), 1)
+            self.assertEqual(len(events[0].provenance), 1)
+
+    def test_two_different_provenance_records_merge_without_duplication(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            first = root / "a.jsonl"
+            second = root / "b.jsonl"
+            _write_jsonl(
+                first,
+                [
+                    _base_event(
+                        provenance=[
+                            {
+                                "source": "claude-code",
+                                "capture_mode": "hook",
+                                "adapter_version": "1.0.0",
+                            }
+                        ]
+                    )
+                ],
+            )
+            _write_jsonl(
+                second,
+                [
+                    _base_event(
+                        provenance=[
+                            {
+                                "source": "codex",
+                                "capture_mode": "hook",
+                                "adapter_version": "2.0.0",
+                            }
+                        ]
+                    )
+                ],
+            )
+
+            events = load_event_files([first, second])
+            self.assertEqual(len(events), 1)
+            self.assertEqual(len(events[0].provenance), 2)
+            sources = sorted(record.source for record in events[0].provenance)
+            self.assertEqual(sources, ["claude-code", "codex"])
+
+    def test_genuine_conflict_still_raises(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            first = root / "a.jsonl"
+            second = root / "b.jsonl"
+            _write_jsonl(first, [_base_event(data={"summary": "x"})])
+            _write_jsonl(second, [_base_event(data={"summary": "different"})])
+
+            with self.assertRaises(InputError):
+                load_event_files([first, second])
 
 
 if __name__ == "__main__":

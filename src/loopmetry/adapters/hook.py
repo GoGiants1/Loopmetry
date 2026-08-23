@@ -36,7 +36,9 @@ class HookSourceAdapter:
     def capabilities(self) -> AdapterCapabilities:
         return AdapterCapabilities(
             capture_modes=(CaptureMode.HOOK,),
-            evidence_categories=EVIDENCE_CATEGORIES,
+            evidence_categories=tuple(
+                category for category in EVIDENCE_CATEGORIES if category != "requirements"
+            ),
         )
 
     def discover(self, context: DiscoveryContext) -> tuple[SourceCandidate, ...]:
@@ -51,6 +53,8 @@ class HookSourceAdapter:
                 stat = path.stat()
                 modified_at = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc)
                 if context.since is not None and modified_at < context.since:
+                    continue
+                if context.until is not None and modified_at > context.until:
                     continue
                 candidates.append(
                     SourceCandidate(
@@ -78,7 +82,9 @@ class HookSourceAdapter:
             events.extend(load_jsonl(candidate.candidate_id))
         events.sort(key=lambda event: (event.timestamp, event.event_id))
         coverage = CoverageReport(
-            categories={category: Coverage.FULL for category in EVIDENCE_CATEGORIES}
+            categories={
+                category: Coverage.FULL for category in self.capabilities().evidence_categories
+            }
         )
         return AdapterRun(
             source=self.name,

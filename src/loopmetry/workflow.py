@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Sequence
@@ -89,12 +89,41 @@ def load_event_files(paths: Iterable[str | Path]) -> list[Event]:
                 by_id[event.event_id] = event
                 origin[event.event_id] = path
                 continue
-            if existing.to_mapping() != event.to_mapping():
+            existing_without_provenance = _without_provenance(existing)
+            event_without_provenance = _without_provenance(event)
+            if existing_without_provenance != event_without_provenance:
                 raise InputError(
                     "conflicting duplicate event_id "
                     f"{event.event_id!r} in {origin[event.event_id]} and {path}"
                 )
+            by_id[event.event_id] = _merge_provenance(existing, event)
     return sorted(by_id.values(), key=lambda event: (event.timestamp, event.event_id))
+
+
+def _without_provenance(event: Event) -> dict[str, object]:
+    mapping = event.to_mapping()
+    mapping.pop("provenance", None)
+    return mapping
+
+
+def _merge_provenance(existing: Event, incoming: Event) -> Event:
+    """Merge provenance records from ``incoming`` into ``existing``, deduping by equality.
+
+    Overlapping observations of the same event merge without losing provenance
+    (stable invariant 10); this never treats a provenance-only difference as a
+    conflict.
+    """
+
+    merged = list(existing.provenance)
+    seen = [record.to_mapping() for record in merged]
+    for record in incoming.provenance:
+        mapping = record.to_mapping()
+        if mapping not in seen:
+            merged.append(record)
+            seen.append(mapping)
+    if len(merged) == len(existing.provenance):
+        return existing
+    return replace(existing, provenance=tuple(merged))
 
 
 def _write_run_manifest(
