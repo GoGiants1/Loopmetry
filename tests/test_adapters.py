@@ -131,6 +131,19 @@ class CheckpointPersistenceTests(unittest.TestCase):
             self.assertTrue(str(path).startswith(tmp))
             self.assertNotIn("..", path.name)
 
+    def test_load_checkpoint_rejects_source_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            save_checkpoint(root, Checkpoint(source="claude-code", positions={}))
+            forged_path = checkpoint_path(root, "codex")
+            forged_path.parent.mkdir(parents=True, exist_ok=True)
+            forged_path.write_text(
+                json_module.dumps({"source": "claude-code", "positions": {}}),
+                encoding="utf-8",
+            )
+            with self.assertRaises(AdapterError):
+                load_checkpoint(root, "codex")
+
 
 def _write_hook_file(root: Path, name: str, events: list[dict]) -> Path:
     hooks_dir = root / ".loopmetry" / "hooks"
@@ -142,8 +155,8 @@ def _write_hook_file(root: Path, name: str, events: list[dict]) -> Path:
     return path
 
 
-def _hook_event(event_id: str) -> dict:
-    return {
+def _hook_event(event_id: str, **overrides: object) -> dict:
+    event = {
         "schema_version": "0.2",
         "event_id": event_id,
         "project_id": "proj",
@@ -157,6 +170,8 @@ def _hook_event(event_id: str) -> dict:
             {"source": "claude-code", "capture_mode": "hook", "adapter_version": "1.0.0"}
         ],
     }
+    event.update(overrides)
+    return event
 
 
 class HookSourceAdapterTests(unittest.TestCase):
@@ -206,7 +221,7 @@ class HookSourceAdapterTests(unittest.TestCase):
             self.assertNotIn("requirements", run.coverage.categories)
             self.assertIn("commands", run.coverage.categories)
 
-    def test_until_filters_by_mtime(self) -> None:
+    def test_discover_does_not_filter_by_file_mtime(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             path = _write_hook_file(root, "claude-code.jsonl", [_hook_event("a")])
@@ -214,12 +229,118 @@ class HookSourceAdapterTests(unittest.TestCase):
             adapter = HookSourceAdapter()
             context = DiscoveryContext(project_root=root, until=far_past)
             candidates = adapter.discover(context)
-            self.assertEqual(candidates, ())
-
-            recent_future = datetime(2100, 1, 1, tzinfo=timezone.utc)
-            context = DiscoveryContext(project_root=root, until=recent_future)
-            candidates = adapter.discover(context)
             self.assertEqual([candidate.label for candidate in candidates], [path.name])
+
+    def test_import_candidates_filters_by_event_timestamp(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_hook_file(
+                root,
+                "claude-code.jsonl",
+                [
+                    _hook_event("early", timestamp="2026-08-01T00:00:00Z"),
+                    _hook_event("late", timestamp="2026-08-20T00:00:00Z"),
+                ],
+            )
+            adapter = HookSourceAdapter()
+            bound = datetime(2026, 8, 10, tzinfo=timezone.utc)
+
+            until_context = DiscoveryContext(project_root=root, until=bound)
+            until_run = adapter.import_candidates(
+                adapter.discover(until_context), until_context
+            )
+            self.assertEqual([event.event_id for event in until_run.events], ["early"])
+
+            since_context = DiscoveryContext(project_root=root, since=bound)
+            since_run = adapter.import_candidates(
+                adapter.discover(since_context), since_context
+            )
+            self.assertEqual([event.event_id for event in since_run.events], ["late"])
+
+    def test_late_append_does_not_exclude_earlier_events(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            # A single append-only file: mtime reflects only the last append,
+            # but the window bound must still admit the earlier in-window event.
+            _write_hook_file(
+                root,
+                "claude-code.jsonl",
+                [
+                    _hook_event("early", timestamp="2026-08-05T00:00:00Z"),
+                    _hook_event("late", timestamp="2026-08-20T00:00:00Z"),
+                ],
+            )
+            adapter = HookSourceAdapter()
+            context = DiscoveryContext(
+                project_root=root, until=datetime(2026, 8, 10, tzinfo=timezone.utc)
+            )
+            run = adapter.import_candidates(adapter.discover(context), context)
+            self.assertEqual([event.event_id for event in run.events], ["early"])
+
+    def test_import_candidates_merges_duplicate_event_id_across_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_hook_file(
+                root,
+                "claude-code.jsonl",
+                [
+                    _hook_event(
+                        "shared",
+                        provenance=[
+                            {
+                                "source": "claude-code",
+                                "capture_mode": "hook",
+                                "adapter_version": "1.0.0",
+                            }
+                        ],
+                    )
+                ],
+            )
+            _write_hook_file(
+                root,
+                "codex.jsonl",
+                [
+                    _hook_event(
+                        "shared",
+                        provenance=[
+                            {
+                                "source": "codex",
+                                "capture_mode": "hook",
+                                "adapter_version": "1.0.0",
+                            }
+                        ],
+                    )
+                ],
+            )
+            adapter = HookSourceAdapter()
+            context = DiscoveryContext(project_root=root)
+            run = adapter.import_candidates(adapter.discover(context), context)
+            self.assertEqual(len(run.events), 1)
+            self.assertEqual(len(run.events[0].provenance), 2)
+
+    def test_import_candidates_raises_on_genuine_conflict_across_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_hook_file(
+                root, "claude-code.jsonl", [_hook_event("shared", data={"summary": "x"})]
+            )
+            _write_hook_file(
+                root, "codex.jsonl", [_hook_event("shared", data={"summary": "different"})]
+            )
+            adapter = HookSourceAdapter()
+            context = DiscoveryContext(project_root=root)
+            with self.assertRaises(AdapterError):
+                adapter.import_candidates(adapter.discover(context), context)
+
+    def test_coverage_is_none_when_no_candidates_found(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            adapter = HookSourceAdapter()
+            context = DiscoveryContext(project_root=Path(tmp))
+            run = adapter.import_candidates(adapter.discover(context), context)
+            self.assertEqual(run.events, ())
+            self.assertTrue(
+                all(value == Coverage.NONE for value in run.coverage.categories.values())
+            )
 
 
 if __name__ == "__main__":

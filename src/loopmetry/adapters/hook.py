@@ -11,12 +11,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Sequence
 
+from ..event_merge import EventConflictError, merge_events
 from ..hook_capture import HOOK_ADAPTER_VERSION
 from ..io import load_jsonl
-from ..schema import CaptureMode
+from ..schema import CaptureMode, Event
 from .base import (
     EVIDENCE_CATEGORIES,
     AdapterCapabilities,
+    AdapterError,
     AdapterRun,
     Checkpoint,
     Coverage,
@@ -42,6 +44,10 @@ class HookSourceAdapter:
         )
 
     def discover(self, context: DiscoveryContext) -> tuple[SourceCandidate, ...]:
+        # Hook output is one append-only file per provider, so a file's mtime
+        # reflects only its last append and cannot bound the range of event
+        # timestamps inside it. Discovery therefore lists every candidate file;
+        # ``since``/``until`` are enforced per-event in import_candidates().
         base = Path(context.project_root).expanduser()
         candidates: list[SourceCandidate] = []
         for directory in (base / ".loopmetry" / "hooks", base / ".loopmetry" / "events"):
@@ -52,10 +58,6 @@ class HookSourceAdapter:
                     continue
                 stat = path.stat()
                 modified_at = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc)
-                if context.since is not None and modified_at < context.since:
-                    continue
-                if context.until is not None and modified_at > context.until:
-                    continue
                 candidates.append(
                     SourceCandidate(
                         candidate_id=str(path),
@@ -77,13 +79,32 @@ class HookSourceAdapter:
         context: DiscoveryContext,
         checkpoint: Checkpoint | None = None,
     ) -> AdapterRun:
-        events = []
+        def in_window(event: Event) -> bool:
+            if context.since is not None and event.timestamp < context.since:
+                return False
+            if context.until is not None and event.timestamp > context.until:
+                return False
+            return True
+
+        by_id: dict[str, Event] = {}
         for candidate in candidates:
-            events.extend(load_jsonl(candidate.candidate_id))
-        events.sort(key=lambda event: (event.timestamp, event.event_id))
+            for event in load_jsonl(candidate.candidate_id):
+                if not in_window(event):
+                    continue
+                existing = by_id.get(event.event_id)
+                if existing is None:
+                    by_id[event.event_id] = event
+                    continue
+                try:
+                    by_id[event.event_id] = merge_events(existing, event)
+                except EventConflictError as exc:
+                    raise AdapterError(str(exc)) from exc
+
+        events = sorted(by_id.values(), key=lambda event: (event.timestamp, event.event_id))
         coverage = CoverageReport(
             categories={
-                category: Coverage.FULL for category in self.capabilities().evidence_categories
+                category: (Coverage.FULL if events else Coverage.NONE)
+                for category in self.capabilities().evidence_categories
             }
         )
         return AdapterRun(

@@ -26,7 +26,12 @@ def load_checkpoint(project_root: Path, source: str) -> Checkpoint | None:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise AdapterError(f"corrupt checkpoint file: {path}") from exc
-    return Checkpoint.from_mapping(raw)
+    checkpoint = Checkpoint.from_mapping(raw)
+    if checkpoint.source != source:
+        raise AdapterError(
+            f"checkpoint at {path} has source {checkpoint.source!r}, expected {source!r}"
+        )
+    return checkpoint
 
 
 def save_checkpoint(project_root: Path, checkpoint: Checkpoint) -> Path:

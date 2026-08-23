@@ -8,7 +8,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
+from .event_merge import EventConflictError, merge_events
 from .schema import Event
+
+
+class StorageError(ValueError):
+    """Raised when persisted evidence cannot be reconciled with new evidence."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,7 +48,8 @@ class EventStore:
                 event_type TEXT NOT NULL,
                 actor TEXT NOT NULL,
                 source TEXT NOT NULL,
-                data_json TEXT NOT NULL
+                data_json TEXT NOT NULL,
+                provenance_json TEXT NOT NULL DEFAULT '[]'
             )
             """
         )
@@ -51,7 +57,28 @@ class EventStore:
             "CREATE INDEX IF NOT EXISTS idx_events_project_time "
             "ON events(project_id, timestamp, event_id)"
         )
+        columns = {row[1] for row in self._connection.execute("PRAGMA table_info(events)")}
+        if "provenance_json" not in columns:
+            self._connection.execute(
+                "ALTER TABLE events ADD COLUMN provenance_json TEXT NOT NULL DEFAULT '[]'"
+            )
         self._connection.commit()
+
+    def _row_to_event(self, row: sqlite3.Row) -> Event:
+        return Event.from_mapping(
+            {
+                "event_id": row["event_id"],
+                "schema_version": row["schema_version"],
+                "project_id": row["project_id"],
+                "session_id": row["session_id"],
+                "timestamp": row["timestamp"],
+                "type": row["event_type"],
+                "actor": row["actor"],
+                "source": row["source"],
+                "data": json.loads(row["data_json"]),
+                "provenance": json.loads(row["provenance_json"]),
+            }
+        )
 
     def close(self) -> None:
         self._connection.close()
@@ -67,58 +94,68 @@ class EventStore:
         skipped = 0
         with self._connection:
             for event in events:
-                cursor = self._connection.execute(
-                    """
-                    INSERT OR IGNORE INTO events (
-                        event_id, schema_version, project_id, session_id,
-                        timestamp, event_type, actor, source, data_json
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        event.event_id,
-                        event.schema_version,
-                        event.project_id,
-                        event.session_id,
-                        event.timestamp.isoformat(),
-                        event.type.value,
-                        event.actor.value,
-                        event.source,
-                        json.dumps(event.data, ensure_ascii=False, sort_keys=True),
-                    ),
-                )
-                if cursor.rowcount == 1:
+                row = self._connection.execute(
+                    "SELECT * FROM events WHERE event_id = ?", (event.event_id,)
+                ).fetchone()
+                if row is None:
+                    self._connection.execute(
+                        """
+                        INSERT INTO events (
+                            event_id, schema_version, project_id, session_id,
+                            timestamp, event_type, actor, source, data_json,
+                            provenance_json
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            event.event_id,
+                            event.schema_version,
+                            event.project_id,
+                            event.session_id,
+                            event.timestamp.isoformat(),
+                            event.type.value,
+                            event.actor.value,
+                            event.source,
+                            json.dumps(event.data, ensure_ascii=False, sort_keys=True),
+                            json.dumps(
+                                [record.to_mapping() for record in event.provenance],
+                                ensure_ascii=False,
+                            ),
+                        ),
+                    )
                     inserted += 1
-                else:
-                    skipped += 1
+                    continue
+
+                existing = self._row_to_event(row)
+                try:
+                    merged = merge_events(existing, event)
+                except EventConflictError as exc:
+                    raise StorageError(str(exc)) from exc
+                if merged is not existing:
+                    self._connection.execute(
+                        "UPDATE events SET provenance_json = ? WHERE event_id = ?",
+                        (
+                            json.dumps(
+                                [record.to_mapping() for record in merged.provenance],
+                                ensure_ascii=False,
+                            ),
+                            event.event_id,
+                        ),
+                    )
+                skipped += 1
         return IngestResult(inserted=inserted, skipped=skipped)
 
     def list_events(self, project_id: str) -> list[Event]:
         rows = self._connection.execute(
             """
             SELECT event_id, schema_version, project_id, session_id,
-                   timestamp, event_type, actor, source, data_json
+                   timestamp, event_type, actor, source, data_json, provenance_json
             FROM events
             WHERE project_id = ?
             ORDER BY timestamp ASC, event_id ASC
             """,
             (project_id,),
         ).fetchall()
-        return [
-            Event.from_mapping(
-                {
-                    "event_id": row["event_id"],
-                    "schema_version": row["schema_version"],
-                    "project_id": row["project_id"],
-                    "session_id": row["session_id"],
-                    "timestamp": row["timestamp"],
-                    "type": row["event_type"],
-                    "actor": row["actor"],
-                    "source": row["source"],
-                    "data": json.loads(row["data_json"]),
-                }
-            )
-            for row in rows
-        ]
+        return [self._row_to_event(row) for row in rows]
 
     def list_projects(self) -> list[tuple[str, int]]:
         rows = self._connection.execute(

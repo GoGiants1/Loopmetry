@@ -143,6 +143,35 @@ class ParticipantWorkflowTests(unittest.TestCase):
             sources = sorted(record.source for record in events[0].provenance)
             self.assertEqual(sources, ["claude-code", "codex"])
 
+    def test_schema_version_only_difference_merges_instead_of_aborting(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            first = root / "a.jsonl"
+            second = root / "b.jsonl"
+            legacy = _base_event()
+            legacy.pop("provenance")
+            legacy["schema_version"] = "0.1"
+            _write_jsonl(first, [legacy])
+            _write_jsonl(
+                second,
+                [
+                    _base_event(
+                        provenance=[
+                            {
+                                "source": "claude-code",
+                                "capture_mode": "hook",
+                                "adapter_version": "1.0.0",
+                            }
+                        ]
+                    )
+                ],
+            )
+
+            events = load_event_files([first, second])
+            self.assertEqual(len(events), 1)
+            self.assertEqual(events[0].schema_version, "0.2")
+            self.assertEqual(len(events[0].provenance), 1)
+
     def test_genuine_conflict_still_raises(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
