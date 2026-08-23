@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
@@ -16,6 +17,11 @@ from loopmetry.adapters.base import (
     DiscoveryContext,
     ImportPreview,
     SourceCandidate,
+)
+from loopmetry.adapters.checkpoints import (
+    checkpoint_path,
+    load_checkpoint,
+    save_checkpoint,
 )
 
 
@@ -80,6 +86,40 @@ class ModelBasicsTests(unittest.TestCase):
     def test_diagnostic_default_count(self) -> None:
         diagnostic = Diagnostic(kind="unparsed_record", summary="unknown record type")
         self.assertEqual(diagnostic.count, 1)
+
+
+class CheckpointPersistenceTests(unittest.TestCase):
+    def test_missing_checkpoint_returns_none(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertIsNone(load_checkpoint(Path(tmp), "claude-code"))
+
+    def test_save_and_load_round_trip(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            checkpoint = Checkpoint(
+                source="claude-code",
+                positions={"a": {"content_sha256": "deadbeef", "records_read": 3}},
+            )
+            written = save_checkpoint(root, checkpoint)
+            self.assertEqual(written, checkpoint_path(root, "claude-code"))
+            loaded = load_checkpoint(root, "claude-code")
+            assert loaded is not None
+            self.assertEqual(loaded.positions["a"]["records_read"], 3)
+
+    def test_corrupt_checkpoint_raises_adapter_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = checkpoint_path(root, "claude-code")
+            path.parent.mkdir(parents=True)
+            path.write_text("{not json", encoding="utf-8")
+            with self.assertRaises(AdapterError):
+                load_checkpoint(root, "claude-code")
+
+    def test_source_name_is_sanitized_in_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = checkpoint_path(Path(tmp), "../evil source")
+            self.assertTrue(str(path).startswith(tmp))
+            self.assertNotIn("..", path.name)
 
 
 if __name__ == "__main__":
