@@ -947,7 +947,7 @@ git commit -m "feat: add consented loopmetry history discover/preview/import"
 - Modify: `docs/submission-workflow.md` (participant flow: note that backfilled events in `.loopmetry/events/` are picked up by `loopmetry run` discovery exactly like hook events)
 - Modify: `AGENTS.md` routing row (add `src/loopmetry/adapters/claude_code_history.py`, `tests/test_claude_code_history.py`)
 
-- [ ] **Step 1: Update the four documents**
+- [x] **Step 1: Update the four documents**
 
 In `docs/hook-capture.md` "Relationship to historical backfill": change "A consented historical-backfill adapter (planned) can recover…" to present tense and document the three commands with one example:
 
@@ -958,7 +958,7 @@ loopmetry history import --source claude-code --since 2026-08-01
 
 noting: bounded to this project's sessions, mtime-window `--since`, interactive confirmation or explicit `--yes`, output under `.loopmetry/events/`, incremental via `.loopmetry/checkpoints/`. In `docs/roadmap.md`, prefix slice 2 with "*(implemented)*". In `AGENTS.md`, extend the adapter routing row. In `docs/submission-workflow.md`, add one sentence where input discovery is described.
 
-- [ ] **Step 2: End-to-end verification**
+- [x] **Step 2: End-to-end verification**
 
 ```bash
 uv run python -m unittest discover -s tests -v
@@ -975,7 +975,7 @@ uv run loopmetry history preview --source claude-code --root .
 
 Expected: a candidate list with no import performed. Do not commit any generated `.loopmetry/` output.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add docs/hook-capture.md docs/roadmap.md docs/submission-workflow.md AGENTS.md
