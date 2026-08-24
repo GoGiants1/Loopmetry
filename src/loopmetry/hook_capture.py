@@ -18,6 +18,8 @@ from typing import Any, Iterable, Mapping
 
 from .schema import Actor, Event, EventType
 
+HOOK_ADAPTER_VERSION = "1.0.0"
+
 _SUPPORTED_SOURCES = {"claude-code", "codex"}
 _PATH_KEYS = ("file_path", "filePath", "path", "notebook_path", "notebookPath")
 _PATCH_FILE_RE = re.compile(r"^\*\*\*\s+(Add|Update|Delete)\s+File:\s*(.+?)\s*$", re.MULTILINE)
@@ -269,7 +271,7 @@ def _base_event(
     session_id = str(payload.get("session_id") or "unknown-session")
     return Event.from_mapping(
         {
-            "schema_version": "0.1",
+            "schema_version": "0.2",
             "event_id": _event_id(payload, event_type, suffix, source=source),
             "project_id": project_id,
             "session_id": session_id,
@@ -278,6 +280,13 @@ def _base_event(
             "actor": actor.value,
             "source": source,
             "data": dict(data),
+            "provenance": [
+                {
+                    "source": source,
+                    "capture_mode": "hook",
+                    "adapter_version": HOOK_ADAPTER_VERSION,
+                }
+            ],
         }
     )
 

@@ -11,7 +11,8 @@ from datetime import datetime, timezone
 from enum import StrEnum
 from typing import Any, Mapping
 
-SCHEMA_VERSION = "0.1"
+SCHEMA_VERSION = "0.2"
+SUPPORTED_SCHEMA_VERSIONS = frozenset({"0.1", "0.2"})
 
 
 class SchemaError(ValueError):
@@ -38,6 +39,52 @@ class Actor(StrEnum):
     AGENT = "agent"
     TOOL = "tool"
     SYSTEM = "system"
+
+
+class CaptureMode(StrEnum):
+    HOOK = "hook"
+    HISTORY_BACKFILL = "history-backfill"
+    EXPLICIT_IMPORT = "explicit-import"
+    DETERMINISTICALLY_DERIVED = "deterministically-derived"
+
+
+@dataclass(frozen=True, slots=True)
+class ProvenanceRecord:
+    """How one observation of an event was obtained (D-011)."""
+
+    source: str
+    capture_mode: CaptureMode
+    adapter_version: str
+    source_ref: Mapping[str, Any] | None = None
+
+    @classmethod
+    def from_mapping(cls, raw: Any) -> "ProvenanceRecord":
+        if not isinstance(raw, Mapping):
+            raise SchemaError("provenance entries must be JSON objects")
+        try:
+            capture_mode = CaptureMode(_required_text(raw.get("capture_mode"), "capture_mode"))
+        except ValueError as exc:
+            allowed = ", ".join(member.value for member in CaptureMode)
+            raise SchemaError(f"unknown capture_mode; expected one of: {allowed}") from exc
+        source_ref = raw.get("source_ref")
+        if source_ref is not None and not isinstance(source_ref, Mapping):
+            raise SchemaError("provenance source_ref must be a JSON object")
+        return cls(
+            source=_required_text(raw.get("source"), "provenance.source"),
+            capture_mode=capture_mode,
+            adapter_version=_required_text(raw.get("adapter_version"), "adapter_version"),
+            source_ref=dict(source_ref) if source_ref is not None else None,
+        )
+
+    def to_mapping(self) -> dict[str, Any]:
+        mapping: dict[str, Any] = {
+            "source": self.source,
+            "capture_mode": self.capture_mode.value,
+            "adapter_version": self.adapter_version,
+        }
+        if self.source_ref is not None:
+            mapping["source_ref"] = dict(self.source_ref)
+        return mapping
 
 
 _VALID_VERIFICATION_STATUSES = {"passed", "failed", "error", "skipped"}
@@ -92,6 +139,7 @@ class Event:
     actor: Actor
     source: str
     data: Mapping[str, Any] = field(default_factory=dict)
+    provenance: tuple[ProvenanceRecord, ...] = ()
     schema_version: str = SCHEMA_VERSION
 
     @classmethod
@@ -102,9 +150,10 @@ class Event:
         schema_version = _required_text(
             raw.get("schema_version", SCHEMA_VERSION), "schema_version"
         )
-        if schema_version != SCHEMA_VERSION:
+        if schema_version not in SUPPORTED_SCHEMA_VERSIONS:
+            supported = ", ".join(sorted(SUPPORTED_SCHEMA_VERSIONS))
             raise SchemaError(
-                f"unsupported schema_version {schema_version!r}; expected {SCHEMA_VERSION!r}"
+                f"unsupported schema_version {schema_version!r}; expected one of: {supported}"
             )
 
         try:
@@ -124,6 +173,13 @@ class Event:
             raise SchemaError("data must be a JSON object")
         data_dict = dict(data)
 
+        raw_provenance = raw.get("provenance", [])
+        if raw_provenance is None:
+            raw_provenance = []
+        if not isinstance(raw_provenance, list):
+            raise SchemaError("provenance must be a list of JSON objects")
+        provenance = tuple(ProvenanceRecord.from_mapping(item) for item in raw_provenance)
+
         event = cls(
             event_id=_required_text(raw.get("event_id"), "event_id"),
             project_id=_required_text(raw.get("project_id"), "project_id"),
@@ -133,6 +189,7 @@ class Event:
             actor=actor,
             source=_required_text(raw.get("source", "normalized"), "source"),
             data=data_dict,
+            provenance=provenance,
             schema_version=schema_version,
         )
         event._validate_type_specific_data()
@@ -190,7 +247,7 @@ class Event:
         return tuple(dict.fromkeys(values))
 
     def to_mapping(self) -> dict[str, Any]:
-        return {
+        mapping: dict[str, Any] = {
             "schema_version": self.schema_version,
             "event_id": self.event_id,
             "project_id": self.project_id,
@@ -201,3 +258,6 @@ class Event:
             "source": self.source,
             "data": dict(self.data),
         }
+        if self.provenance:
+            mapping["provenance"] = [record.to_mapping() for record in self.provenance]
+        return mapping

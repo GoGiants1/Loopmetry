@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Iterable, Sequence
 from uuid import uuid4
 
+from .event_merge import EventConflictError, merge_events
 from .evaluation import ProjectEvaluator
 from .evaluation_models import ProjectReport
 from .io import InputError, load_jsonl, select_project
@@ -89,11 +90,13 @@ def load_event_files(paths: Iterable[str | Path]) -> list[Event]:
                 by_id[event.event_id] = event
                 origin[event.event_id] = path
                 continue
-            if existing.to_mapping() != event.to_mapping():
+            try:
+                by_id[event.event_id] = merge_events(existing, event)
+            except EventConflictError as exc:
                 raise InputError(
                     "conflicting duplicate event_id "
                     f"{event.event_id!r} in {origin[event.event_id]} and {path}"
-                )
+                ) from exc
     return sorted(by_id.values(), key=lambda event: (event.timestamp, event.event_id))
 
 

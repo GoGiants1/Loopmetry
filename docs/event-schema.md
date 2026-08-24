@@ -1,4 +1,4 @@
-# Canonical event schema v0.1
+# Canonical event schema v0.2
 
 Loopmetry consumes UTF-8 JSON Lines. Each non-empty line is one event object. Comment lines beginning with `#` are ignored.
 
@@ -6,7 +6,7 @@ Loopmetry consumes UTF-8 JSON Lines. Each non-empty line is one event object. Co
 
 | Field | Type | Meaning |
 |---|---|---|
-| `schema_version` | string | Currently `0.1` |
+| `schema_version` | string | `0.1` or `0.2`; new events are written as `0.2` |
 | `event_id` | string | Stable unique ID; used for deduplication and evidence references |
 | `project_id` | string | Stable project identity across sessions |
 | `session_id` | string | One human–agent work session or execution window |
@@ -16,9 +16,9 @@ Loopmetry consumes UTF-8 JSON Lines. Each non-empty line is one event object. Co
 | `source` | string | Adapter provenance, such as `claude-code` or `codex` |
 | `data` | object | Type-specific fields |
 
-## Provenance envelope (planned, milestone 2)
+## Provenance envelope
 
-Decision D-011 makes prospective hook capture and retrospective historical backfill first-class source paths behind one adapter contract. To support that, each imported event will additionally carry a `provenance` list alongside `source`. It is a list — not flat fields — because a merged event must keep every provenance record. Each record contains:
+Decision D-011 makes prospective hook capture and retrospective historical backfill first-class source paths behind one adapter contract. To support that, each imported event carries a `provenance` list alongside `source`. It is a list — not flat fields — because a merged event must keep every provenance record. Each record contains:
 
 | Field | Type | Meaning |
 |---|---|---|
@@ -27,7 +27,7 @@ Decision D-011 makes prospective hook capture and retrospective historical backf
 | `adapter_version` | string | Version of the adapter that produced the record |
 | `source_ref` | object | Optional content-minimized reference to the origin (for example a session-file identity and record index), never a transcript excerpt |
 
-When the same action is observed by more than one path, the merged event accumulates provenance records; conflicting observations surface as `adapter_conflict` diagnostics and lower confidence rather than being silently resolved. Coverage is reported per evidence category at the adapter-run level, not per event. Field names and the schema-version bump will be finalized in the milestone 2 foundation slice; see `docs/architecture.md` and `docs/decision-log.md` D-011.
+When the same action is observed by more than one path, the merged event accumulates provenance records; conflicting observations surface as `adapter_conflict` diagnostics and lower confidence rather than being silently resolved. Coverage is reported per evidence category at the adapter-run level, not per event. See `docs/architecture.md` and `docs/decision-log.md` D-011.
 
 ## Event types
 
@@ -198,4 +198,4 @@ The core metrics do not require raw prompt text, response text, source-code exce
 
 ## Compatibility policy
 
-Schema `0.1` is experimental. Breaking changes may occur before `1.0`, but each persisted event carries `schema_version` so migrations can be explicit.
+Schema `0.1` is experimental. Breaking changes may occur before `1.0`, but each persisted event carries `schema_version` so migrations can be explicit. Schema `0.2` adds the optional `provenance` list and remains backward compatible; `0.1` events continue to load and implicitly carry an empty provenance tuple.

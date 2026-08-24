@@ -29,7 +29,7 @@ Then route by task:
 | Submission package and upload | `docs/submission-workflow.md`, `schemas/submission-v1.schema.json` | `src/loopmetry/submission.py` | `tests/test_submission.py` |
 | Roster, attempts, review status | `docs/submission-workflow.md` | `src/loopmetry/admin_storage.py`, `src/loopmetry/admin_server.py` | `tests/test_admin_storage.py`, `tests/test_admin_server.py` |
 | Claude Code / Codex capture | `docs/hook-capture.md`, `docs/event-schema.md` | `src/loopmetry/hook_capture.py`, `src/loopmetry/schema.py` | `tests/test_hook_capture.py`, `tests/test_schema.py` |
-| Source adapters and historical backfill | `docs/architecture.md`, `docs/hook-capture.md`, `docs/decision-log.md` D-011 | `src/loopmetry/adapters/` (planned; hook path is `src/loopmetry/hook_capture.py` today) | `tests/test_hook_capture.py` (adapter tests planned) |
+| Source adapters and historical backfill | `docs/architecture.md`, `docs/hook-capture.md`, `docs/decision-log.md` D-011 | `src/loopmetry/adapters/`, `src/loopmetry/hook_capture.py` | `tests/test_adapters.py`, `tests/test_hook_capture.py` |
 | Deterministic evaluation | `docs/metrics.md`, `docs/event-schema.md` | `src/loopmetry/evaluation.py`, `src/loopmetry/metrics_*.py` | `tests/test_evaluation.py` |
 | Reports and visualization | `docs/web-ui.md` | `src/loopmetry/report.py` | `tests/test_report.py` |
 | Future LLM boundary | `docs/llm-evaluation.md`, `schemas/llm-evaluation-*.json`, `rubrics/` | `src/loopmetry/llm_bundle.py` | `tests/test_llm_bundle.py` |

@@ -57,7 +57,7 @@ canonical evidence → bounded LLM bundle → provider adapter → separate judg
 
 ### Capture and adapter layer
 
-Two source paths are first-class (decision D-011) and both produce the same canonical events behind one shared `SourceAdapter` contract:
+Two source paths are first-class (decision D-011) and both produce the same canonical events behind one shared `SourceAdapter` contract, which lives in `src/loopmetry/adapters/base.py`. The hook path conforms to this contract via `src/loopmetry/adapters/hook.py`:
 
 - **Live hook capture** collects work prospectively as it happens. It minimizes content at capture time, never sees a full transcript, and is least exposed to provider-internal format changes. It only covers work performed after integration.
 - **Historical backfill** recovers sessions that already exist locally. It enables zero-setup analysis and richer plan/conversation context, but depends on versioned vendor formats and requires explicit consent to read local transcripts.

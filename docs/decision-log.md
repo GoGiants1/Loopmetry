@@ -23,6 +23,7 @@ Statuses:
 | D-009 | 2026-08-22 | Accepted | Submission retries are idempotent and review status is manual |
 | D-010 | 2026-08-22 | Accepted | Keep agent instructions navigational; store rationale in this decision log |
 | D-011 | 2026-08-23 | Accepted | Prospective hook capture and retrospective historical backfill are both first-class source paths |
+| D-012 | 2026-08-23 | Accepted | Hybrid auto mode bounds historical backfill to the assignment window by default; broader operational proposals deferred |
 
 ---
 
@@ -121,6 +122,28 @@ Statuses:
 - hook integration is recommended for prospective capture quality but is not required for analysis.
 
 **Related:** `docs/architecture.md`, `docs/hook-capture.md`, `docs/roadmap.md`, `docs/submission-workflow.md`, `src/loopmetry/hook_capture.py`, future `src/loopmetry/adapters/`
+
+---
+
+## D-012 — Assignment-scoped backfill window; defer broader operational changes
+
+**Status:** Accepted
+**Context:** A 2026-08-23 review of how a comparable external tool (local session discovery, attribution, and upload for agent transcripts) handles bounding, caching, and consent surfaced ideas worth weighing against D-011. Most of what it does — field-level provenance merge rather than source-priority, excluding unattributable sessions rather than widening scope, streaming/checkpointed import, no container runtime — already matches D-011 and `AGENTS.md`'s stdlib-only constraint, so no new decision was needed for those. A few ideas were genuinely new. This entry records which were accepted now and which were deliberately deferred, so they are not silently lost or silently adopted.
+**Decision:** When milestone 2's hybrid `loopmetry run --source auto` (slice 4) ships, its default historical-backfill time window is the administrator-configured assignment window (start/end), not an unbounded or fixed-lookback default; participants can still widen it explicitly in the preview step. The following related proposals are explicitly deferred, not adopted, pending their own plan-mode design session because they are cross-cutting changes to the storage or auth model:
+
+- replacing long-lived bearer submission tokens with a device-style auth flow and tokenless reruns;
+- an outbox/pending-upload-replay model with a stable CLI exit-code contract;
+- a layered local cache (adapter / merge / evaluation / future-judge) keyed and reported in the run manifest;
+- a thin, version-pinned shell bootstrap (`run.sh`) in front of the Python CLI; and
+- an optional Docker-based isolation mode (native `uvx` remains the only supported default execution path — this was already Loopmetry's direction, not a new decision).
+
+**Consequences:**
+
+- slice 4's design must read the assignment's `starts_at`/`ends_at` (once the administrator schema carries them) as the backfill default window;
+- this entry is not authorization to build the deferred items; each needs its own plan-mode session before implementation starts; and
+- if one of the deferred items is later accepted, it gets its own decision entry rather than rewriting this one.
+
+**Related:** `docs/decision-log.md` D-011, `docs/roadmap.md` milestone 2 slice 4, `docs/submission-workflow.md`
 
 ---
 

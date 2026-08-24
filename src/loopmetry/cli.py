@@ -559,7 +559,10 @@ def _run(args: argparse.Namespace) -> int:
         events = load_jsonl(args.input)
         with EventStore(args.db) as store:
             result = store.add_events(events)
-        print(f"ingested: {result.inserted} inserted, {result.skipped} duplicate(s) skipped")
+        print(
+            f"ingested: {result.inserted} inserted, {result.merged} merged, "
+            f"{result.skipped} duplicate(s) skipped"
+        )
         return 0
 
     if args.command == "report":
