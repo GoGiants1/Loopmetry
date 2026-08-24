@@ -111,6 +111,11 @@ class ClaudeCodeHistoryAdapter:
         )
 
     def discover(self, context: DiscoveryContext) -> tuple[SourceCandidate, ...]:
+        # A session file is appended to for as long as it is active, so its mtime
+        # reflects only the last append and cannot bound the range of event
+        # timestamps inside it (the same reasoning as HookSourceAdapter.discover).
+        # Every candidate file is therefore listed regardless of since/until;
+        # the window is enforced per-event in import_candidates() instead.
         project_root = Path(context.project_root).expanduser().resolve()
         project_dir = self.claude_home / "projects" / encode_claude_project_dir(project_root)
         diagnostics: list[Diagnostic] = []
@@ -124,10 +129,6 @@ class ClaudeCodeHistoryAdapter:
                 continue
             stat = path.stat()
             modified_at = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc)
-            if context.since is not None and modified_at < context.since:
-                continue
-            if context.until is not None and modified_at > context.until:
-                continue
             cwd, session_id = _session_cwd(path)
             if cwd is None or not _cwd_in_scope(cwd, project_root):
                 unattributed += 1
@@ -208,6 +209,7 @@ class ClaudeCodeHistoryAdapter:
             for key, count in session.diagnostic_counts.items():
                 diagnostic_counts[key] = diagnostic_counts.get(key, 0) + count
             positions[candidate.candidate_id] = session.position()
+        events = [event for event in events if _in_window(event, context)]
         diagnostics = tuple(
             Diagnostic(kind=kind, summary=summary, count=count)
             for (kind, summary), count in sorted(diagnostic_counts.items())
@@ -232,6 +234,14 @@ class ClaudeCodeHistoryAdapter:
             coverage=coverage,
             checkpoint=Checkpoint(source=self.name, positions=positions),
         )
+
+
+def _in_window(event: Event, context: DiscoveryContext) -> bool:
+    if context.since is not None and event.timestamp < context.since:
+        return False
+    if context.until is not None and event.timestamp > context.until:
+        return False
+    return True
 
 
 def _first_line_hash(path: Path) -> str | None:

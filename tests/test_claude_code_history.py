@@ -83,7 +83,11 @@ class DiscoveryTests(unittest.TestCase):
             )
             self.assertEqual(len(adapter.discover(context)), 1)
 
-    def test_since_filters_by_mtime(self) -> None:
+    def test_discover_does_not_filter_by_file_mtime(self) -> None:
+        # A session file is appended to for as long as it is active, so its mtime
+        # (reflecting only the last append) cannot bound the range of event
+        # timestamps inside it (D-013 note; same reasoning as HookSourceAdapter).
+        # since/until must be enforced per-event in import_candidates(), not here.
         with tempfile.TemporaryDirectory() as tmp:
             adapter, context, project_dir = self._setup(tmp)
             root = str(context.project_root)
@@ -92,7 +96,7 @@ class DiscoveryTests(unittest.TestCase):
                 project_root=context.project_root,
                 since=datetime(2999, 1, 1, tzinfo=timezone.utc),
             )
-            self.assertEqual(adapter.discover(future), ())
+            self.assertEqual(len(adapter.discover(future)), 1)
 
 
 def _assistant_tool_use(name: str, tool_input: dict, tool_use_id: str, cwd: str) -> dict:
@@ -219,6 +223,58 @@ class ImportTests(unittest.TestCase):
             [e.to_mapping() for e in first.events],
             [e.to_mapping() for e in second.events],
         )
+
+    def test_import_candidates_filters_by_event_timestamp(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "work" / "project"
+            root.mkdir(parents=True)
+            claude_home = Path(tmp) / "claude-home"
+            project_dir = claude_home / "projects" / encode_claude_project_dir(root)
+            record = _record(
+                "user",
+                cwd=str(root),
+                timestamp="2020-01-01T00:00:00Z",
+                message={"role": "user", "content": "too old"},
+            )
+            _write_session(project_dir, "sess.jsonl", [record])
+            adapter = ClaudeCodeHistoryAdapter(claude_home=claude_home)
+            context = DiscoveryContext(
+                project_root=root,
+                since=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            )
+            run = adapter.import_candidates(adapter.discover(context), context)
+        self.assertEqual(run.events, ())
+
+    def test_late_append_does_not_exclude_earlier_events(self) -> None:
+        # A single file's mtime reflects its last append; an `until` bound between
+        # an early and a late event must exclude only the late one, not the whole
+        # file (which discover()'s now-unconditional listing makes possible).
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "work" / "project"
+            root.mkdir(parents=True)
+            claude_home = Path(tmp) / "claude-home"
+            project_dir = claude_home / "projects" / encode_claude_project_dir(root)
+            early = _record(
+                "user",
+                cwd=str(root),
+                timestamp="2026-01-01T00:00:00Z",
+                message={"role": "user", "content": "early"},
+            )
+            late = _record(
+                "user",
+                cwd=str(root),
+                timestamp="2026-06-01T00:00:00Z",
+                message={"role": "user", "content": "late"},
+            )
+            _write_session(project_dir, "sess.jsonl", [early, late])
+            adapter = ClaudeCodeHistoryAdapter(claude_home=claude_home)
+            context = DiscoveryContext(
+                project_root=root,
+                until=datetime(2026, 3, 1, tzinfo=timezone.utc),
+            )
+            run = adapter.import_candidates(adapter.discover(context), context)
+        self.assertEqual(len(run.events), 1)
+        self.assertEqual(run.events[0].timestamp.isoformat(), "2026-01-01T00:00:00+00:00")
 
 
 class IncrementalImportTests(unittest.TestCase):

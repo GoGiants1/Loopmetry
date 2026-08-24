@@ -34,17 +34,21 @@ def load_checkpoint(project_root: Path, source: str) -> Checkpoint | None:
     return checkpoint
 
 
-def save_checkpoint(project_root: Path, checkpoint: Checkpoint) -> Path:
-    path = checkpoint_path(project_root, checkpoint.source)
+def atomic_write_bytes(path: Path, payload: bytes) -> None:
+    """Write ``payload`` to ``path`` via a same-directory temp file + rename.
+
+    Shared by checkpoint persistence and any other local-only output that must
+    never be left half-written (e.g. a history adapter's imported events file).
+    """
+
     path.parent.mkdir(parents=True, exist_ok=True)
     try:
         path.parent.chmod(0o700)
     except OSError:
         pass
-    payload = json.dumps(checkpoint.to_mapping(), ensure_ascii=False, indent=2) + "\n"
     descriptor, temp_name = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
     try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        with os.fdopen(descriptor, "wb") as handle:
             handle.write(payload)
         os.chmod(temp_name, 0o600)
         os.replace(temp_name, path)
@@ -54,4 +58,12 @@ def save_checkpoint(project_root: Path, checkpoint: Checkpoint) -> Path:
         except OSError:
             pass
         raise
+
+
+def save_checkpoint(project_root: Path, checkpoint: Checkpoint) -> Path:
+    path = checkpoint_path(project_root, checkpoint.source)
+    payload = (json.dumps(checkpoint.to_mapping(), ensure_ascii=False, indent=2) + "\n").encode(
+        "utf-8"
+    )
+    atomic_write_bytes(path, payload)
     return path

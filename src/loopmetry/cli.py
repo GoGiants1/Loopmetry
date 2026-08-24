@@ -9,14 +9,13 @@ import json
 import os
 import shlex
 import sys
-import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Sequence
 
 from . import __version__
 from .adapters.base import AdapterError, DiscoveryContext
-from .adapters.checkpoints import load_checkpoint, save_checkpoint
+from .adapters.checkpoints import atomic_write_bytes, load_checkpoint, save_checkpoint
 from .adapters.claude_code_history import ClaudeCodeHistoryAdapter
 from .admin_server import (
     DEFAULT_ADMIN_BIND,
@@ -26,6 +25,7 @@ from .admin_server import (
     create_admin_server,
 )
 from .admin_storage import AdminStorageError, AdminStore, REVIEW_STATUSES
+from .event_merge import EventConflictError, merge_events
 from .evaluation import ProjectEvaluator
 from .hook_capture import (
     HookCaptureError,
@@ -397,27 +397,11 @@ def _parse_since(value: str | None) -> datetime | None:
 
 
 def _write_events_atomically(path: Path, events: Sequence[Event]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        path.parent.chmod(0o700)
-    except OSError:
-        pass
     payload = "".join(
         json.dumps(event.to_mapping(), ensure_ascii=False, separators=(",", ":")) + "\n"
         for event in events
     ).encode("utf-8")
-    descriptor, temp_name = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
-    try:
-        with os.fdopen(descriptor, "wb") as handle:
-            handle.write(payload)
-        os.chmod(temp_name, 0o600)
-        os.replace(temp_name, path)
-    except OSError:
-        try:
-            os.unlink(temp_name)
-        except OSError:
-            pass
-        raise
+    atomic_write_bytes(path, payload)
 
 
 def _run_history(args: argparse.Namespace) -> int:
@@ -537,7 +521,19 @@ def _run_history(args: argparse.Namespace) -> int:
 
         by_id: dict[str, Event] = {event.event_id: event for event in existing_events}
         for event in run.events:
-            by_id.setdefault(event.event_id, event)
+            existing = by_id.get(event.event_id)
+            if existing is None:
+                by_id[event.event_id] = event
+                continue
+            # Overlapping observations merge without losing provenance (invariant
+            # 10); a genuine content conflict under the same event_id is an error,
+            # matching io.load_jsonl and EventStore.add_events elsewhere.
+            try:
+                by_id[event.event_id] = merge_events(existing, event)
+            except EventConflictError as exc:
+                raise InputError(
+                    f"{output_path}: conflicting duplicate event_id {event.event_id!r}"
+                ) from exc
         merged_events = sorted(by_id.values(), key=lambda event: (event.timestamp, event.event_id))
         _write_events_atomically(output_path, merged_events)
 
