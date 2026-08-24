@@ -6,16 +6,21 @@ code, complete tool output, absolute path prefixes, and full shell commands.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import re
-import shlex
 import subprocess
 from datetime import datetime, timezone
-from pathlib import Path, PurePosixPath, PureWindowsPath
+from pathlib import Path
 from typing import Any, Iterable, Mapping
 
+from .minimize import (
+    canonical_hash as _canonical_hash,
+    command_signature as _command_signature,
+    derive_project_id,
+    hash_text as _hash_text,
+    safe_relative_path as _safe_path,
+)
 from .schema import Actor, Event, EventType
 
 HOOK_ADAPTER_VERSION = "1.0.0"
@@ -25,7 +30,6 @@ _PATH_KEYS = ("file_path", "filePath", "path", "notebook_path", "notebookPath")
 _PATCH_FILE_RE = re.compile(r"^\*\*\*\s+(Add|Update|Delete)\s+File:\s*(.+?)\s*$", re.MULTILINE)
 _GIT_PATCH_PATH_RE = re.compile(r"^(?:\+\+\+|---)\s+[ab]/(.+?)\s*$", re.MULTILINE)
 _EXIT_CODE_RE = re.compile(r"(?:exit(?:ed)?(?:\s+with)?\s+code|return\s+code)\D*(-?\d+)", re.I)
-_SAFE_ID_RE = re.compile(r"[^a-zA-Z0-9._-]+")
 _STATUS_CONTAINER_KEYS = frozenset(
     {"output", "content", "stdout", "stderr", "message", "text", "result", "details", "tool_result"}
 )
@@ -39,61 +43,6 @@ class HookCaptureError(ValueError):
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
-
-
-def _hash_text(value: str) -> str:
-    return hashlib.sha256(value.encode("utf-8", errors="replace")).hexdigest()
-
-
-def _canonical_hash(value: object) -> str:
-    encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    return _hash_text(encoded)
-
-
-def _safe_identifier(value: str, *, fallback: str) -> str:
-    normalized = _SAFE_ID_RE.sub("-", value.strip()).strip("-._")
-    return normalized[:80] or fallback
-
-
-def derive_project_id(cwd: str) -> str:
-    """Derive a stable, pseudonymous project ID from the working directory."""
-
-    path = Path(cwd).expanduser()
-    label = _safe_identifier(path.name or "project", fallback="project").lower()
-    digest = _hash_text(str(path.resolve()))[:10]
-    return f"{label}-{digest}"
-
-
-def _safe_path(value: object, cwd: str) -> str | None:
-    if not isinstance(value, str) or not value.strip():
-        return None
-    raw = value.strip().replace("\\", "/")
-
-    # Handle Windows drive and UNC paths lexically even when Loopmetry itself runs on Unix.
-    windows_candidate = PureWindowsPath(value.strip())
-    windows_root = PureWindowsPath(cwd)
-    if windows_candidate.is_absolute() or windows_candidate.drive:
-        try:
-            relative = windows_candidate.relative_to(windows_root)
-        except ValueError:
-            basename = windows_candidate.name or "unknown"
-            return f"<external-path-redacted>/{basename}"
-        return PurePosixPath(*relative.parts).as_posix()
-
-    root = Path(cwd).expanduser()
-    candidate = Path(value).expanduser()
-    try:
-        if candidate.is_absolute():
-            relative = candidate.resolve().relative_to(root.resolve())
-            return relative.as_posix()
-    except (OSError, ValueError):
-        basename = PurePosixPath(raw).name or "unknown"
-        return f"<external-path-redacted>/{basename}"
-
-    parts = [part for part in PurePosixPath(raw).parts if part not in {".", "/"}]
-    if ".." in parts:
-        return f"<traversal-redacted>/{parts[-1] if parts else 'unknown'}"
-    return "/".join(parts) or None
 
 
 def _extract_paths(tool_input: object, *, cwd: str) -> list[tuple[str, str | None]]:
@@ -202,42 +151,6 @@ def _raw_command(tool_input: object) -> str | None:
         if isinstance(value, str) and value.strip():
             return value.strip()
     return None
-
-
-def _command_signature(command: str) -> tuple[str, str | None]:
-    """Return a content-minimized command label and optional verification kind."""
-
-    lowered = " ".join(command.lower().split())
-    rules: tuple[tuple[str, str, str | None], ...] = (
-        (r"\b(pytest|python\s+-m\s+pytest)\b", "pytest", "test"),
-        (r"\bpython\s+-m\s+unittest\b", "python -m unittest", "test"),
-        (r"\b(go\s+test)\b", "go test", "test"),
-        (r"\b(cargo\s+test)\b", "cargo test", "test"),
-        (r"\b(dotnet\s+test)\b", "dotnet test", "test"),
-        (r"\b(npm|pnpm|yarn|bun)\s+(run\s+)?test\b", "javascript test", "test"),
-        (r"\b(mvn|mvnw)\b.*\btest\b", "maven test", "test"),
-        (r"\b(gradle|gradlew)\b.*\btest\b", "gradle test", "test"),
-        (r"\b(tox|nox)\b", "python test environment", "test"),
-        (r"\b(ruff|flake8|pylint|eslint|biome)\b", "lint", "lint"),
-        (r"\b(mypy|pyright|pyre|tsc)\b", "type check", "typecheck"),
-        (r"\b(bandit|semgrep|trivy|grype|gitleaks)\b", "security scan", "security"),
-        (r"\b(npm|pnpm|yarn|bun)\s+(run\s+)?build\b", "javascript build", "build"),
-        (r"\b(cargo\s+build|go\s+build|dotnet\s+build|mvn\b.*package|gradle\b.*build)\b", "build", "build"),
-        (r"\buv\s+build\b", "uv build", "build"),
-        (r"\bgit\s+commit\b", "git commit", None),
-    )
-    for pattern, label, kind in rules:
-        if re.search(pattern, lowered):
-            return label, kind
-
-    try:
-        tokens = shlex.split(command, posix=os.name != "nt")
-    except ValueError:
-        tokens = command.split()
-    if not tokens:
-        return "shell command", None
-    executable = PurePosixPath(tokens[0].replace("\\", "/")).name
-    return _safe_identifier(executable.lower(), fallback="shell-command"), None
 
 
 def _event_id(
