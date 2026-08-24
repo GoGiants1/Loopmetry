@@ -9,10 +9,15 @@ import json
 import os
 import shlex
 import sys
+import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Sequence
 
 from . import __version__
+from .adapters.base import AdapterError, DiscoveryContext
+from .adapters.checkpoints import load_checkpoint, save_checkpoint
+from .adapters.claude_code_history import ClaudeCodeHistoryAdapter
 from .admin_server import (
     DEFAULT_ADMIN_BIND,
     DEFAULT_ADMIN_PORT,
@@ -31,6 +36,7 @@ from .hook_capture import (
 from .io import InputError, load_jsonl, select_project
 from .llm_bundle import BundleError, build_evaluation_bundle, render_evaluation_bundle
 from .report import render
+from .schema import Event
 from .storage import EventStore
 from .submission import (
     DEFAULT_SUBMISSION_TOKEN_ENV,
@@ -41,6 +47,9 @@ from .submission import (
     write_private_text,
 )
 from .workflow import discover_event_files, run_participant_workflow
+
+DEFAULT_CLAUDE_HOME_ENV = "LOOPMETRY_CLAUDE_HOME"
+_HISTORY_ADAPTERS: dict[str, type] = {"claude-code": ClaudeCodeHistoryAdapter}
 
 DEFAULT_DB = Path(".loopmetry/loopmetry.db")
 DEFAULT_ADMIN_DB = Path(".loopmetry/admin.db")
@@ -350,7 +359,203 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Allow a non-loopback bind. Put the server behind TLS and access control.",
     )
+
+    history = subparsers.add_parser(
+        "history",
+        help="Discover, preview, and import existing local agent sessions (consented backfill).",
+    )
+    history_subparsers = history.add_subparsers(dest="history_command", required=True)
+    for verb, help_text in (
+        ("discover", "List importable sessions for this project."),
+        ("preview", "Show what an import would read, without importing."),
+        ("import", "Import sessions into canonical events (requires consent)."),
+    ):
+        verb_parser = history_subparsers.add_parser(verb, help=help_text)
+        verb_parser.add_argument("--source", required=True, choices=sorted(_HISTORY_ADAPTERS))
+        verb_parser.add_argument("--root", default=".")
+        verb_parser.add_argument("--since", default=None, help="YYYY-MM-DD lower bound")
+        if verb == "import":
+            verb_parser.add_argument("--output", default=None)
+            verb_parser.add_argument(
+                "--yes",
+                action="store_true",
+                help="Consent to reading local Claude Code transcripts non-interactively.",
+            )
+        else:
+            verb_parser.add_argument("--json", action="store_true")
+
     return parser
+
+
+def _parse_since(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.strptime(value, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    except ValueError as exc:
+        raise InputError(f"--since must be YYYY-MM-DD, got {value!r}") from exc
+
+
+def _write_events_atomically(path: Path, events: Sequence[Event]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        path.parent.chmod(0o700)
+    except OSError:
+        pass
+    payload = "".join(
+        json.dumps(event.to_mapping(), ensure_ascii=False, separators=(",", ":")) + "\n"
+        for event in events
+    ).encode("utf-8")
+    descriptor, temp_name = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(payload)
+        os.chmod(temp_name, 0o600)
+        os.replace(temp_name, path)
+    except OSError:
+        try:
+            os.unlink(temp_name)
+        except OSError:
+            pass
+        raise
+
+
+def _run_history(args: argparse.Namespace) -> int:
+    root = Path(args.root).expanduser()
+    since = _parse_since(args.since)
+    interactive = sys.stdin.isatty()
+    context = DiscoveryContext(project_root=root, since=since, interactive=interactive)
+    claude_home_raw = os.environ.get(DEFAULT_CLAUDE_HOME_ENV)
+    claude_home = Path(claude_home_raw).expanduser() if claude_home_raw else None
+    adapter = _HISTORY_ADAPTERS[args.source](claude_home=claude_home)
+
+    if args.history_command == "discover":
+        candidates = adapter.discover(context)
+        if args.json:
+            _write_output(
+                json.dumps(
+                    [
+                        {
+                            "label": c.label,
+                            "session_id": c.session_id,
+                            "size_bytes": c.size_bytes,
+                            "modified_at": c.modified_at.isoformat().replace("+00:00", "Z"),
+                        }
+                        for c in candidates
+                    ],
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                None,
+            )
+        elif not candidates:
+            print("no sessions found")
+        else:
+            for candidate in candidates:
+                print(
+                    f"{candidate.label}\t{candidate.session_id}\t{candidate.size_bytes}B\t"
+                    f"{candidate.modified_at.isoformat().replace('+00:00', 'Z')}"
+                )
+        return 0
+
+    candidates = adapter.discover(context)
+    preview = adapter.preview(candidates)
+    diagnostics = adapter.last_discovery_diagnostics
+
+    if args.history_command == "preview":
+        if args.json:
+            _write_output(
+                json.dumps(
+                    {
+                        "sessions": preview.session_count,
+                        "total_size_bytes": preview.total_size_bytes,
+                        "candidates": [
+                            {
+                                "label": c.label,
+                                "session_id": c.session_id,
+                                "size_bytes": c.size_bytes,
+                            }
+                            for c in preview.candidates
+                        ],
+                        "diagnostics": [
+                            {"kind": d.kind, "summary": d.summary, "count": d.count}
+                            for d in diagnostics
+                        ],
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                None,
+            )
+        else:
+            if not preview.candidates:
+                print("no sessions found")
+            else:
+                for candidate in preview.candidates:
+                    print(f"{candidate.label}\t{candidate.session_id}\t{candidate.size_bytes}B")
+                print(
+                    f"total: {preview.session_count} session(s), "
+                    f"{preview.total_size_bytes} byte(s)"
+                )
+            for diagnostic in diagnostics:
+                print(f"diagnostic: {diagnostic.kind} ({diagnostic.count}): {diagnostic.summary}")
+        return 0
+
+    if args.history_command == "import":
+        if interactive:
+            print(
+                f"{preview.session_count} session(s), {preview.total_size_bytes} byte(s) "
+                "of local Claude Code history will be read."
+            )
+            answer = input("Proceed with import? [y/N] ").strip().lower()
+            if answer != "y":
+                print("import cancelled")
+                return 0
+        elif not args.yes:
+            raise InputError(
+                "loopmetry history import requires --yes when not run interactively "
+                "(this flag is the explicit consent to read local history)"
+            )
+
+        try:
+            checkpoint = load_checkpoint(root, adapter.name)
+        except AdapterError as exc:
+            print(f"warning: {exc}; re-importing without a checkpoint", file=sys.stderr)
+            checkpoint = None
+
+        run = adapter.import_candidates(candidates, context, checkpoint=checkpoint)
+
+        output_path = (
+            Path(args.output).expanduser()
+            if args.output
+            else root / ".loopmetry" / "events" / "claude-code-history.jsonl"
+        )
+        try:
+            existing_events = load_jsonl(output_path) if output_path.exists() else []
+        except InputError:
+            existing_events = []
+
+        by_id: dict[str, Event] = {event.event_id: event for event in existing_events}
+        for event in run.events:
+            by_id.setdefault(event.event_id, event)
+        merged_events = sorted(by_id.values(), key=lambda event: (event.timestamp, event.event_id))
+        _write_events_atomically(output_path, merged_events)
+
+        if run.checkpoint is not None:
+            save_checkpoint(root, run.checkpoint)
+
+        new_count = len(by_id) - len(existing_events)
+        diagnostic_summary = (
+            ", ".join(f"{d.kind}={d.count}" for d in run.diagnostics) or "none"
+        )
+        print(
+            f"imported {new_count} new event(s); {len(merged_events)} total in {output_path}"
+        )
+        print(f"diagnostics: {diagnostic_summary}")
+        print(f"coverage: {run.coverage.to_mapping()['categories']}")
+        return 0
+
+    raise AssertionError(f"unhandled history command: {args.history_command}")
 
 
 def _run_admin(args: argparse.Namespace) -> int:
@@ -586,6 +791,9 @@ def _run(args: argparse.Namespace) -> int:
 
     if args.command == "admin":
         return _run_admin(args)
+
+    if args.command == "history":
+        return _run_history(args)
 
     raise AssertionError(f"unhandled command: {args.command}")
 

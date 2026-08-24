@@ -809,13 +809,12 @@ git commit -m "test: prove incremental and rotation-safe history import"
   - `loopmetry history import --source claude-code [--root DIR] [--since YYYY-MM-DD] [--output PATH] [--yes]` — interactive TTY: print the preview, then require `y` on stdin; non-TTY/non-interactive: require `--yes`, else exit 2 with a message naming the flag (running `import --yes` IS the explicit consent — never triggered implicitly). Writes the union of existing and new events (deduplicated by `event_id`, sorted by `(timestamp, event_id)`) to `--output` (default `<root>/.loopmetry/events/claude-code-history.jsonl`), saves the checkpoint via `save_checkpoint`, prints an import summary: events written, per-kind diagnostic counts, coverage. A corrupt checkpoint (`AdapterError` from `load_checkpoint`) is reported and treated as no checkpoint.
   - Only `--source claude-code` is accepted (choices list); Codex arrives in slice 5.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
-Append to `tests/test_cli.py` (match its existing invocation style — it calls `loopmetry.cli.main([...])` and captures stdout; reuse the synthetic-transcript helpers by importing from `tests.test_claude_code_history` or duplicating the two small builders locally):
+`tests/test_cli.py`'s actual convention is subprocess-based (`self.run_cli(*args, env=...)` spawns `python -m loopmetry`), not a direct `main([...])` call with `mock.patch.dict`/`contextlib.redirect_stdout` — follow the file's real style, not the assumed one below. Append to `CliTests`:
 
 ```python
-class HistoryCliTests(unittest.TestCase):
-    def _make_history(self, tmp: Path) -> Path:
+    def _make_history_project(self, tmp: Path) -> tuple[Path, Path]:
         root = tmp / "work" / "project"
         root.mkdir(parents=True)
         claude_home = tmp / "claude-home"
@@ -828,82 +827,73 @@ class HistoryCliTests(unittest.TestCase):
             "cwd": str(root),
             "message": {"role": "user", "content": "hello"},
         }
-        (project_dir / "sess.jsonl").write_text(
-            json.dumps(record) + "\n", encoding="utf-8"
-        )
-        self.claude_home = claude_home
-        return root
+        (project_dir / "sess.jsonl").write_text(json.dumps(record) + "\n", encoding="utf-8")
+        return root, claude_home
 
-    def test_discover_lists_sessions(self) -> None:
+    def test_history_discover_lists_sessions(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            root = self._make_history(Path(tmp))
-            with mock.patch.dict(
-                os.environ, {"LOOPMETRY_CLAUDE_HOME": str(self.claude_home)}
-            ):
-                stdout = io.StringIO()
-                with contextlib.redirect_stdout(stdout):
-                    exit_code = main(
-                        ["history", "discover", "--source", "claude-code", "--root", str(root)]
-                    )
-        self.assertEqual(exit_code, 0)
-        self.assertIn("sess.jsonl", stdout.getvalue())
+            root, claude_home = self._make_history_project(Path(tmp))
+            result = self.run_cli(
+                "history", "discover", "--source", "claude-code", "--root", str(root),
+                env={**os.environ, "LOOPMETRY_CLAUDE_HOME": str(claude_home)},
+            )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("sess.jsonl", result.stdout)
 
-    def test_import_requires_consent_when_not_interactive(self) -> None:
+    def test_history_import_requires_consent_when_not_interactive(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            root = self._make_history(Path(tmp))
-            with mock.patch.dict(
-                os.environ, {"LOOPMETRY_CLAUDE_HOME": str(self.claude_home)}
-            ):
-                exit_code = main(
-                    ["history", "import", "--source", "claude-code", "--root", str(root)]
-                )
-        self.assertEqual(exit_code, 2)
+            root, claude_home = self._make_history_project(Path(tmp))
+            result = self.run_cli(
+                "history", "import", "--source", "claude-code", "--root", str(root),
+                env={**os.environ, "LOOPMETRY_CLAUDE_HOME": str(claude_home)},
+            )
+        self.assertEqual(result.returncode, 2)
         self.assertFalse((root / ".loopmetry" / "events").exists())
 
-    def test_import_with_yes_writes_events_and_checkpoint(self) -> None:
+    def test_history_import_with_yes_writes_events_and_checkpoint(self) -> None:
+        # NOTE: assertions that touch `root` must stay inside the `with` block —
+        # the temp directory (and everything under it) is gone once it exits.
         with tempfile.TemporaryDirectory() as tmp:
-            root = self._make_history(Path(tmp))
-            with mock.patch.dict(
-                os.environ, {"LOOPMETRY_CLAUDE_HOME": str(self.claude_home)}
-            ):
-                exit_code = main(
-                    [
-                        "history", "import", "--source", "claude-code",
-                        "--root", str(root), "--yes",
-                    ]
-                )
-        self.assertEqual(exit_code, 0)
-        output = root / ".loopmetry" / "events" / "claude-code-history.jsonl"
-        events = load_jsonl(output)
-        self.assertEqual(len(events), 1)
-        self.assertEqual(events[0].provenance[0].capture_mode.value, "history-backfill")
-        checkpoint = root / ".loopmetry" / "checkpoints" / "claude-code-history.json"
-        self.assertTrue(checkpoint.exists())
+            root, claude_home = self._make_history_project(Path(tmp))
+            result = self.run_cli(
+                "history", "import", "--source", "claude-code",
+                "--root", str(root), "--yes",
+                env={**os.environ, "LOOPMETRY_CLAUDE_HOME": str(claude_home)},
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            output = root / ".loopmetry" / "events" / "claude-code-history.jsonl"
+            events = load_jsonl(output)
+            self.assertEqual(len(events), 1)
+            self.assertEqual(events[0].provenance[0].capture_mode.value, "history-backfill")
+            checkpoint = root / ".loopmetry" / "checkpoints" / "claude-code-history.json"
+            self.assertTrue(checkpoint.exists())
 
-    def test_import_twice_is_idempotent(self) -> None:
+    def test_history_import_twice_is_idempotent(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            root = self._make_history(Path(tmp))
-            with mock.patch.dict(
-                os.environ, {"LOOPMETRY_CLAUDE_HOME": str(self.claude_home)}
-            ):
-                args = [
-                    "history", "import", "--source", "claude-code",
-                    "--root", str(root), "--yes",
-                ]
-                main(args)
-                main(args)
-        output = root / ".loopmetry" / "events" / "claude-code-history.jsonl"
-        self.assertEqual(len(load_jsonl(output)), 1)
+            root, claude_home = self._make_history_project(Path(tmp))
+            args = (
+                "history", "import", "--source", "claude-code",
+                "--root", str(root), "--yes",
+            )
+            env = {**os.environ, "LOOPMETRY_CLAUDE_HOME": str(claude_home)}
+            first = self.run_cli(*args, env=env)
+            second = self.run_cli(*args, env=env)
+            self.assertEqual(first.returncode, 0, first.stderr)
+            self.assertEqual(second.returncode, 0, second.stderr)
+            output = root / ".loopmetry" / "events" / "claude-code-history.jsonl"
+            self.assertEqual(len(load_jsonl(output)), 1)
 ```
 
-(`LOOPMETRY_CLAUDE_HOME` is a test-focused env override for the Claude home directory — add it to the CLI handler as `Path(os.environ.get("LOOPMETRY_CLAUDE_HOME", Path.home() / ".claude"))`; it also gives administrators a documented escape hatch for non-standard installs.)
+Add `import os` and `from loopmetry.adapters.claude_code_history import encode_claude_project_dir` / `from loopmetry.io import load_jsonl` to the test file's imports.
 
-- [ ] **Step 2: Run tests to verify they fail**
+`self.run_cli`'s `env` parameter, when given, fully replaces the subprocess environment (not merges), so pass `{**os.environ, "LOOPMETRY_CLAUDE_HOME": ...}` rather than just the one override — otherwise the child process loses `PATH` and fails to start. `LOOPMETRY_CLAUDE_HOME` is a test-focused env override for the Claude home directory — add it to the CLI handler as `Path(os.environ.get("LOOPMETRY_CLAUDE_HOME", Path.home() / ".claude"))`; it also gives administrators a documented escape hatch for non-standard installs.
+
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `uv run python -m unittest tests.test_cli -v`
 Expected: FAIL (`SystemExit`/argparse error: `invalid choice: 'history'`).
 
-- [ ] **Step 3: Implement the CLI**
+- [x] **Step 3: Implement the CLI**
 
 In `_build_parser` add:
 
