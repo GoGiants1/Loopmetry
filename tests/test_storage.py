@@ -13,10 +13,16 @@ from loopmetry.storage import EventStore, StorageError
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def _event(event_id: str, *, provenance: list[dict], data: dict | None = None) -> Event:
+def _event(
+    event_id: str,
+    *,
+    provenance: list[dict],
+    data: dict | None = None,
+    schema_version: str = "0.2",
+) -> Event:
     return Event.from_mapping(
         {
-            "schema_version": "0.2",
+            "schema_version": schema_version,
             "event_id": event_id,
             "project_id": "proj",
             "session_id": "sess",
@@ -72,11 +78,32 @@ class EventStoreTests(unittest.TestCase):
                 loaded = store.list_events("proj")
 
             self.assertEqual(second_result.inserted, 0)
-            self.assertEqual(second_result.skipped, 1)
+            self.assertEqual(second_result.merged, 1)
+            self.assertEqual(second_result.skipped, 0)
             self.assertEqual(len(loaded), 1)
             self.assertEqual(len(loaded[0].provenance), 2)
             sources = sorted(record.capture_mode.value for record in loaded[0].provenance)
             self.assertEqual(sources, ["history-backfill", "hook"])
+
+    def test_legacy_row_is_upgraded_when_current_event_is_reingested(self) -> None:
+        legacy = _event("evt-1", provenance=[], schema_version="0.1")
+        current = _event(
+            "evt-1",
+            provenance=[
+                {"source": "claude-code", "capture_mode": "hook", "adapter_version": "1.0.0"}
+            ],
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            db_path = Path(directory) / "loopmetry.db"
+            with EventStore(db_path) as store:
+                store.add_events([legacy])
+                result = store.add_events([current])
+                loaded = store.list_events("proj")
+
+            self.assertEqual(result.merged, 1)
+            self.assertEqual(len(loaded), 1)
+            self.assertEqual(loaded[0].schema_version, "0.2")
+            self.assertEqual(len(loaded[0].provenance), 1)
 
     def test_add_events_raises_on_genuine_content_conflict(self) -> None:
         first = _event("evt-1", provenance=[], data={"summary": "x"})

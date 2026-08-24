@@ -19,6 +19,7 @@ class StorageError(ValueError):
 @dataclass(frozen=True, slots=True)
 class IngestResult:
     inserted: int
+    merged: int
     skipped: int
 
 
@@ -91,6 +92,7 @@ class EventStore:
 
     def add_events(self, events: Iterable[Event]) -> IngestResult:
         inserted = 0
+        merged = 0
         skipped = 0
         with self._connection:
             for event in events:
@@ -127,22 +129,26 @@ class EventStore:
 
                 existing = self._row_to_event(row)
                 try:
-                    merged = merge_events(existing, event)
+                    merged_event = merge_events(existing, event)
                 except EventConflictError as exc:
                     raise StorageError(str(exc)) from exc
-                if merged is not existing:
-                    self._connection.execute(
-                        "UPDATE events SET provenance_json = ? WHERE event_id = ?",
-                        (
-                            json.dumps(
-                                [record.to_mapping() for record in merged.provenance],
-                                ensure_ascii=False,
-                            ),
-                            event.event_id,
+                if merged_event is existing:
+                    skipped += 1
+                    continue
+                self._connection.execute(
+                    "UPDATE events SET schema_version = ?, provenance_json = ? "
+                    "WHERE event_id = ?",
+                    (
+                        merged_event.schema_version,
+                        json.dumps(
+                            [record.to_mapping() for record in merged_event.provenance],
+                            ensure_ascii=False,
                         ),
-                    )
-                skipped += 1
-        return IngestResult(inserted=inserted, skipped=skipped)
+                        event.event_id,
+                    ),
+                )
+                merged += 1
+        return IngestResult(inserted=inserted, merged=merged, skipped=skipped)
 
     def list_events(self, project_id: str) -> list[Event]:
         rows = self._connection.execute(

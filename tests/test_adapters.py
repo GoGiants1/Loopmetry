@@ -175,6 +175,35 @@ def _hook_event(event_id: str, **overrides: object) -> dict:
 
 
 class HookSourceAdapterTests(unittest.TestCase):
+    def test_events_directory_file_is_not_a_hook_candidate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_hook_file(root, "claude-code.jsonl", [_hook_event("a")])
+            events_dir = root / ".loopmetry" / "events"
+            events_dir.mkdir(parents=True)
+            (events_dir / "claude-code-history.jsonl").write_text(
+                json_module.dumps(_hook_event("b")) + "\n", encoding="utf-8"
+            )
+            adapter = HookSourceAdapter()
+            candidates = adapter.discover(DiscoveryContext(project_root=root))
+            self.assertEqual([candidate.label for candidate in candidates], ["claude-code.jsonl"])
+
+    def test_legacy_event_without_provenance_is_enriched_on_import(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            legacy = _hook_event("a", schema_version="0.1", provenance=[])
+            _write_hook_file(root, "claude-code.jsonl", [legacy])
+            adapter = HookSourceAdapter()
+            context = DiscoveryContext(project_root=root)
+            run = adapter.import_candidates(adapter.discover(context), context)
+            self.assertEqual(len(run.events), 1)
+            event = run.events[0]
+            self.assertEqual(event.schema_version, "0.2")
+            self.assertEqual(len(event.provenance), 1)
+            record = event.provenance[0]
+            self.assertEqual(record.capture_mode.value, "hook")
+            self.assertEqual(record.adapter_version, "legacy-unknown")
+
     def test_discover_orders_deterministically_and_stays_in_project(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -220,6 +249,36 @@ class HookSourceAdapterTests(unittest.TestCase):
             run = adapter.import_candidates(adapter.discover(context), context)
             self.assertNotIn("requirements", run.coverage.categories)
             self.assertIn("commands", run.coverage.categories)
+
+    def test_coverage_reflects_only_observed_event_types(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_hook_file(
+                root,
+                "claude-code.jsonl",
+                [
+                    _hook_event(
+                        "cmd",
+                        type="command",
+                        data={"command": "pytest", "status": "success"},
+                    ),
+                    _hook_event(
+                        "read",
+                        type="file_read",
+                        data={"path": "src/a.py"},
+                    ),
+                ],
+            )
+            adapter = HookSourceAdapter()
+            context = DiscoveryContext(project_root=root)
+            run = adapter.import_candidates(adapter.discover(context), context)
+            self.assertEqual(run.coverage.categories["commands"], Coverage.FULL)
+            self.assertEqual(run.coverage.categories["file_reads"], Coverage.FULL)
+            self.assertEqual(run.coverage.categories["verifications"], Coverage.NONE)
+            self.assertEqual(run.coverage.categories["errors"], Coverage.NONE)
+            self.assertEqual(run.coverage.categories["commits"], Coverage.NONE)
+            self.assertEqual(run.coverage.categories["plans"], Coverage.NONE)
+            self.assertEqual(run.coverage.categories["human_turns"], Coverage.NONE)
 
     def test_discover_does_not_filter_by_file_mtime(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -33,8 +33,12 @@ def merge_events(existing: Event, incoming: Event) -> Event:
     """Merge ``incoming`` into ``existing``, deduping provenance by equality.
 
     Raises ``EventConflictError`` if the events disagree on anything other
-    than provenance or schema version. The merged event's ``schema_version``
-    is normalized to the current ``SCHEMA_VERSION``.
+    than provenance or schema version. Returns ``existing`` unchanged when
+    ``incoming`` adds no new provenance (true no-op re-ingest, regardless of
+    which schema version either copy declares). Only when a merge actually
+    adds provenance does the result's ``schema_version`` get normalized to
+    the current ``SCHEMA_VERSION`` — a version bump reflects newly-recorded
+    provenance, not merely re-observing the same event.
     """
 
     if events_conflict(existing, incoming):
@@ -42,12 +46,14 @@ def merge_events(existing: Event, incoming: Event) -> Event:
 
     merged = list(existing.provenance)
     seen = [record.to_mapping() for record in merged]
+    added = False
     for record in incoming.provenance:
         mapping = record.to_mapping()
         if mapping not in seen:
             merged.append(record)
             seen.append(mapping)
+            added = True
 
-    if len(merged) == len(existing.provenance) and existing.schema_version == SCHEMA_VERSION:
+    if not added:
         return existing
     return replace(existing, provenance=tuple(merged), schema_version=SCHEMA_VERSION)
