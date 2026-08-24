@@ -523,9 +523,25 @@ class ImportTests(unittest.TestCase):
         self.assertEqual(len(run.events), 1)
 
     def test_reimport_is_deterministic(self) -> None:
-        records = [_record("user", message={"role": "user", "content": "hi"})]
-        first = self._import([dict(records[0])])
-        second = self._import([dict(records[0])])
+        # Re-importing the same transcript (no checkpoint passed either time, so
+        # everything is re-read from scratch) must yield byte-identical events.
+        # NOTE: this must reuse one fixed project root across both imports —
+        # `derive_project_id` hashes the resolved root path, so two calls to
+        # `_import` (which each spin up a fresh temp directory) would differ in
+        # `project_id` alone and falsely look non-deterministic.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "work" / "project"
+            root.mkdir(parents=True)
+            claude_home = Path(tmp) / "claude-home"
+            project_dir = claude_home / "projects" / encode_claude_project_dir(root)
+            record = _record(
+                "user", cwd=str(root), message={"role": "user", "content": "hi"}
+            )
+            _write_session(project_dir, "sess.jsonl", [record])
+            adapter = ClaudeCodeHistoryAdapter(claude_home=claude_home)
+            context = DiscoveryContext(project_root=root)
+            first = adapter.import_candidates(adapter.discover(context), context)
+            second = adapter.import_candidates(adapter.discover(context), context)
         self.assertEqual(
             [e.to_mapping() for e in first.events],
             [e.to_mapping() for e in second.events],
@@ -585,7 +601,11 @@ Replace the `NotImplementedError` body. Structure (full code, following the even
             Diagnostic(kind=kind, summary=summary, count=count)
             for (kind, summary), count in sorted(diagnostic_counts.items())
         )
-        degraded = any(d.kind in {"unparsed_record", "truncated_input"} for d in diagnostics)
+        degraded = any(
+            d.kind
+            in {"unparsed_record", "truncated_input", "unresolved_tool_call", "stalled_tool_call"}
+            for d in diagnostics
+        )
         coverage = CoverageReport(
             categories={
                 category: (Coverage.PARTIAL if degraded else Coverage.FULL)

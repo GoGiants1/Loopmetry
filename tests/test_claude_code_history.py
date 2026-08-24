@@ -95,5 +95,256 @@ class DiscoveryTests(unittest.TestCase):
             self.assertEqual(adapter.discover(future), ())
 
 
+def _assistant_tool_use(name: str, tool_input: dict, tool_use_id: str, cwd: str) -> dict:
+    return _record(
+        "assistant",
+        cwd=cwd,
+        message={
+            "role": "assistant",
+            "content": [
+                {"type": "tool_use", "id": tool_use_id, "name": name, "input": tool_input}
+            ],
+        },
+    )
+
+
+def _user_tool_result(tool_use_id: str, cwd: str, is_error: bool = False) -> dict:
+    return _record(
+        "user",
+        cwd=cwd,
+        message={
+            "role": "user",
+            "content": [
+                {"type": "tool_result", "tool_use_id": tool_use_id, "is_error": is_error}
+            ],
+        },
+    )
+
+
+class ImportTests(unittest.TestCase):
+    def _import(self, records: list[dict]):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "work" / "project"
+            root.mkdir(parents=True)
+            claude_home = Path(tmp) / "claude-home"
+            project_dir = claude_home / "projects" / encode_claude_project_dir(root)
+            for record in records:
+                record["cwd"] = str(root)
+            _write_session(project_dir, "sess.jsonl", records)
+            adapter = ClaudeCodeHistoryAdapter(claude_home=claude_home)
+            context = DiscoveryContext(project_root=root)
+            return adapter.import_candidates(adapter.discover(context), context)
+
+    def test_prompt_becomes_hashed_human_intervention(self) -> None:
+        run = self._import(
+            [_record("user", message={"role": "user", "content": "please fix the bug"})]
+        )
+        events = [e for e in run.events if e.type.value == "human_intervention"]
+        self.assertEqual(len(events), 1)
+        self.assertNotIn("please fix the bug", json.dumps(events[0].to_mapping()))
+        self.assertEqual(events[0].data["prompt_length"], len("please fix the bug"))
+        record = events[0].provenance[0]
+        self.assertEqual(record.capture_mode.value, "history-backfill")
+        self.assertEqual(record.source_ref["session_file"], "sess.jsonl")
+
+    def test_read_and_edit_become_file_events_with_relative_paths(self) -> None:
+        cwd_marker = "__CWD__"
+        records = [
+            _assistant_tool_use("Read", {"file_path": cwd_marker + "/src/a.py"}, "t1", ""),
+            _assistant_tool_use("Edit", {"file_path": cwd_marker + "/src/a.py"}, "t2", ""),
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "work" / "project"
+            root.mkdir(parents=True)
+            claude_home = Path(tmp) / "claude-home"
+            project_dir = claude_home / "projects" / encode_claude_project_dir(root)
+            for record in records:
+                record["cwd"] = str(root)
+                block = record["message"]["content"][0]
+                block["input"]["file_path"] = block["input"]["file_path"].replace(
+                    cwd_marker, str(root)
+                )
+            _write_session(project_dir, "sess.jsonl", records)
+            adapter = ClaudeCodeHistoryAdapter(claude_home=claude_home)
+            context = DiscoveryContext(project_root=root)
+            run = adapter.import_candidates(adapter.discover(context), context)
+        types = sorted(e.type.value for e in run.events)
+        self.assertEqual(types, ["file_change", "file_read"])
+        for event in run.events:
+            self.assertEqual(event.data["path"], "src/a.py")
+
+    def test_bash_test_command_yields_command_verification_and_error(self) -> None:
+        run = self._import(
+            [
+                _assistant_tool_use(
+                    "Bash", {"command": "uv run python -m unittest"}, "t1", ""
+                ),
+                _user_tool_result("t1", "", is_error=True),
+            ]
+        )
+        by_type = {e.type.value: e for e in run.events}
+        self.assertEqual(by_type["command"].data["status"], "failed")
+        self.assertNotIn("uv run", json.dumps(by_type["command"].to_mapping()["data"]))
+        self.assertEqual(by_type["verification"].data["status"], "failed")
+        self.assertIn("error", by_type)
+
+    def test_unknown_record_types_become_diagnostics_not_events(self) -> None:
+        run = self._import(
+            [
+                _record("file-history-snapshot"),
+                _record("user", message={"role": "user", "content": "hi"}),
+            ]
+        )
+        kinds = {d.kind for d in run.diagnostics}
+        self.assertIn("skipped_record_type", kinds)
+        self.assertEqual(len(run.events), 1)
+
+    def test_reimport_is_deterministic(self) -> None:
+        # Re-importing the same transcript (no checkpoint passed either time, so
+        # everything is re-read from scratch) must yield byte-identical events.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "work" / "project"
+            root.mkdir(parents=True)
+            claude_home = Path(tmp) / "claude-home"
+            project_dir = claude_home / "projects" / encode_claude_project_dir(root)
+            record = _record(
+                "user", cwd=str(root), message={"role": "user", "content": "hi"}
+            )
+            _write_session(project_dir, "sess.jsonl", [record])
+            adapter = ClaudeCodeHistoryAdapter(claude_home=claude_home)
+            context = DiscoveryContext(project_root=root)
+            first = adapter.import_candidates(adapter.discover(context), context)
+            second = adapter.import_candidates(adapter.discover(context), context)
+        self.assertEqual(
+            [e.to_mapping() for e in first.events],
+            [e.to_mapping() for e in second.events],
+        )
+
+
+class IncrementalImportTests(unittest.TestCase):
+    def test_second_import_with_checkpoint_only_reads_new_records(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "work" / "project"
+            root.mkdir(parents=True)
+            claude_home = Path(tmp) / "claude-home"
+            project_dir = claude_home / "projects" / encode_claude_project_dir(root)
+            first_record = _record(
+                "user", cwd=str(root), message={"role": "user", "content": "one"}
+            )
+            path = _write_session(project_dir, "sess.jsonl", [first_record])
+            adapter = ClaudeCodeHistoryAdapter(claude_home=claude_home)
+            context = DiscoveryContext(project_root=root)
+            run_one = adapter.import_candidates(adapter.discover(context), context)
+            self.assertEqual(len(run_one.events), 1)
+
+            second_record = _record(
+                "user",
+                cwd=str(root),
+                timestamp="2026-08-20T10:00:00Z",
+                message={"role": "user", "content": "two"},
+            )
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(second_record) + "\n")
+            run_two = adapter.import_candidates(
+                adapter.discover(context), context, checkpoint=run_one.checkpoint
+            )
+            self.assertEqual(len(run_two.events), 1)
+            self.assertNotEqual(
+                run_one.events[0].event_id, run_two.events[0].event_id
+            )
+
+    def test_pending_bash_call_resolved_by_later_append_yields_one_correct_event(self) -> None:
+        """D-013: a tool_use at the checkpoint boundary must not lose its real result."""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "work" / "project"
+            root.mkdir(parents=True)
+            claude_home = Path(tmp) / "claude-home"
+            project_dir = claude_home / "projects" / encode_claude_project_dir(root)
+            tool_use = _assistant_tool_use(
+                "Bash", {"command": "uv run pytest"}, "t1", ""
+            )
+            tool_use["cwd"] = str(root)
+            path = _write_session(project_dir, "sess.jsonl", [tool_use])
+            adapter = ClaudeCodeHistoryAdapter(claude_home=claude_home)
+            context = DiscoveryContext(project_root=root)
+
+            run_one = adapter.import_candidates(adapter.discover(context), context)
+            self.assertEqual([e.type.value for e in run_one.events], [])
+            self.assertIn("unresolved_tool_call", {d.kind for d in run_one.diagnostics})
+
+            result = _user_tool_result("t1", "", is_error=False)
+            result["cwd"] = str(root)
+            result["timestamp"] = "2026-08-20T09:00:01Z"
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(result) + "\n")
+            run_two = adapter.import_candidates(
+                adapter.discover(context), context, checkpoint=run_one.checkpoint
+            )
+            by_type = {e.type.value: e for e in run_two.events}
+            self.assertEqual(by_type["command"].data["status"], "success")
+            self.assertNotIn("stalled_tool_call", {d.kind for d in run_two.diagnostics})
+
+    def test_stalled_bash_call_finalizes_to_unknown_only_after_no_growth(self) -> None:
+        """D-013: only finalize to unknown once an import cycle shows the file stopped growing."""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "work" / "project"
+            root.mkdir(parents=True)
+            claude_home = Path(tmp) / "claude-home"
+            project_dir = claude_home / "projects" / encode_claude_project_dir(root)
+            tool_use = _assistant_tool_use(
+                "Bash", {"command": "uv run pytest"}, "t1", ""
+            )
+            tool_use["cwd"] = str(root)
+            _write_session(project_dir, "sess.jsonl", [tool_use])
+            adapter = ClaudeCodeHistoryAdapter(claude_home=claude_home)
+            context = DiscoveryContext(project_root=root)
+
+            run_one = adapter.import_candidates(adapter.discover(context), context)
+            self.assertEqual([e.type.value for e in run_one.events], [])
+
+            # Nothing appended: the file has not grown since run_one left this entry pending.
+            run_two = adapter.import_candidates(
+                adapter.discover(context), context, checkpoint=run_one.checkpoint
+            )
+            by_type = {e.type.value: e for e in run_two.events}
+            self.assertEqual(by_type["command"].data["status"], "unknown")
+            self.assertIn("stalled_tool_call", {d.kind for d in run_two.diagnostics})
+
+            # A third import must not re-emit or conflict with the now-finalized event.
+            run_three = adapter.import_candidates(
+                adapter.discover(context), context, checkpoint=run_two.checkpoint
+            )
+            self.assertEqual(run_three.events, ())
+
+    def test_rotated_transcript_resets_checkpoint_with_diagnostic(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "work" / "project"
+            root.mkdir(parents=True)
+            claude_home = Path(tmp) / "claude-home"
+            project_dir = claude_home / "projects" / encode_claude_project_dir(root)
+            record = _record(
+                "user", cwd=str(root), message={"role": "user", "content": "one"}
+            )
+            _write_session(project_dir, "sess.jsonl", [record])
+            adapter = ClaudeCodeHistoryAdapter(claude_home=claude_home)
+            context = DiscoveryContext(project_root=root)
+            run_one = adapter.import_candidates(adapter.discover(context), context)
+
+            replacement = _record(
+                "user",
+                cwd=str(root),
+                timestamp="2026-08-21T09:00:00Z",
+                message={"role": "user", "content": "different first line"},
+            )
+            _write_session(project_dir, "sess.jsonl", [replacement])
+            run_two = adapter.import_candidates(
+                adapter.discover(context), context, checkpoint=run_one.checkpoint
+            )
+            self.assertEqual(len(run_two.events), 1)
+            self.assertIn("checkpoint_reset", {d.kind for d in run_two.diagnostics})
+
+
 if __name__ == "__main__":
     unittest.main()
