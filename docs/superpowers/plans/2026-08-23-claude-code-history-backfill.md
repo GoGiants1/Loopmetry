@@ -44,7 +44,7 @@
   - `minimize.safe_relative_path(value: object, cwd: str) -> str | None` (from `_safe_path`, line 65)
   - `minimize.command_signature(command: str) -> tuple[str, str | None]` (from `_command_signature`, line 205, plus its regex constants and the `shlex`/`os` fallback)
 
-- [ ] **Step 1: Move the helpers**
+- [x] **Step 1: Move the helpers**
 
 Create `src/loopmetry/minimize.py` with module docstring `"""Shared content-minimization helpers used by every source adapter."""`, the imports they need (`hashlib`, `json`, `os`, `re`, `shlex`, `pathlib` names), the constants `_PATCH_FILE_RE` stays in hook_capture (patch parsing is hook-specific), but move `_SAFE_ID_RE` and the command-signature rule table. Rename per the interface list above (drop leading underscores).
 
@@ -63,12 +63,12 @@ from .minimize import (
 
 (keeping the `derive_project_id` re-export so `from loopmetry.hook_capture import derive_project_id` continues to work for the CLI and tests).
 
-- [ ] **Step 2: Run the full suite to prove behavior is unchanged**
+- [x] **Step 2: Run the full suite to prove behavior is unchanged**
 
 Run: `uv run python -m unittest discover -s tests -v`
 Expected: PASS with the same test count as before the change.
 
-- [ ] **Step 3: Lint and commit**
+- [x] **Step 3: Lint and commit**
 
 ```bash
 uvx --from ruff==0.12.12 ruff check .
@@ -91,7 +91,7 @@ git commit -m "refactor: extract shared minimization helpers for source adapters
   - `encode_claude_project_dir(project_root: Path) -> str` — absolute resolved path with every `/` and `.` replaced by `-` (e.g. `/Users/w/my.app` → `-Users-w-my-app`).
   - `class ClaudeCodeHistoryAdapter` with `name = "claude-code-history"`, `adapter_version = CLAUDE_HISTORY_ADAPTER_VERSION`, constructor `def __init__(self, claude_home: Path | None = None)` (defaults to `Path.home() / ".claude"`; injectable for tests), and the contract methods. `discover` also records `self.last_discovery_diagnostics: tuple[Diagnostic, ...]` (unattributable candidates, skipped subagent dirs).
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `tests/test_claude_code_history.py`:
 
@@ -197,12 +197,12 @@ if __name__ == "__main__":
     unittest.main()
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `uv run python -m unittest tests.test_claude_code_history -v`
 Expected: ERROR `ModuleNotFoundError: No module named 'loopmetry.adapters.claude_code_history'`.
 
-- [ ] **Step 3: Implement discovery**
+- [x] **Step 3: Implement discovery**
 
 Create `src/loopmetry/adapters/claude_code_history.py`:
 
@@ -372,12 +372,12 @@ def _cwd_in_scope(cwd: str, project_root: Path) -> bool:
 
 (`import_candidates` is Task 3 — add a temporary `raise NotImplementedError` body so the class is importable, and remove it in Task 3.)
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `uv run python -m unittest tests.test_claude_code_history -v`
 Expected: PASS.
 
-- [ ] **Step 5: Lint and commit**
+- [x] **Step 5: Lint and commit**
 
 ```bash
 uvx --from ruff==0.12.12 ruff check .
@@ -413,7 +413,7 @@ Event IDs: `f"hist-{canonical_hash({'session': session_id, 'file': file_name, 'i
 
 **Checkpoint-boundary tool_use/tool_result pairing (D-013):** because Bash `command` events depend on pairing a `tool_use` with a `tool_result` that may arrive in a later append, and re-emitting a corrected event under an already-written `event_id` would raise `EventConflictError` on merge, an event's content is only ever written once — after the outcome is either observed or the session is confirmed stalled. See D-013 in `docs/decision-log.md` for the full rationale; the mechanics are in Tasks 3 and 4 below.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Append to `tests/test_claude_code_history.py` (uses the existing `_record`/`_write_session` helpers; note assistant/user record shapes):
 
@@ -548,12 +548,12 @@ class ImportTests(unittest.TestCase):
         )
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `uv run python -m unittest tests.test_claude_code_history -v`
 Expected: FAIL with `NotImplementedError` from `import_candidates`.
 
-- [ ] **Step 3: Implement parsing**
+- [x] **Step 3: Implement parsing**
 
 Replace the `NotImplementedError` body. Structure (full code, following the event table above):
 
@@ -635,12 +635,12 @@ Replace the `NotImplementedError` body. Structure (full code, following the even
 - Every event is built through one `_event(...)` helper that fills the envelope: deterministic `event_id` (formula in the Interfaces block), `source=_EVENT_SOURCE`, `provenance` with `source_ref={"session_file": self.path.name, "record_index": index}`, timestamp from the record (fall back to the previous record's timestamp; if the first record has none, count `("unparsed_record", "record missing timestamp")` and skip), constructed via `Event.from_mapping` so schema validation applies.
 - `position()` returns `{"content_sha256": <sha256 of the first line>, "records_read": <total line count seen>, "pending": <self.pending, JSON-serializable as-is>}`; `_resume_index(saved, path, counts)` returns `saved.get("records_read", 0)` when the stored `content_sha256` still matches the file's current first line, else counts `("checkpoint_reset", "transcript rotated or replaced; re-importing from the start")` and returns 0 (a reset also drops `pending_seed` for that candidate — a rotated file's line indexes no longer mean anything, so any old pending state is stale and must not be restored).
 
-- [ ] **Step 4: Run tests to verify they pass, then the full suite**
+- [x] **Step 4: Run tests to verify they pass, then the full suite**
 
 Run: `uv run python -m unittest tests.test_claude_code_history -v && uv run python -m unittest discover -s tests`
 Expected: PASS.
 
-- [ ] **Step 5: Lint and commit**
+- [x] **Step 5: Lint and commit**
 
 ```bash
 uvx --from ruff==0.12.12 ruff check .
@@ -655,7 +655,7 @@ git commit -m "feat: parse Claude Code transcripts into canonical backfill event
 **Files:**
 - Test: `tests/test_claude_code_history.py` (extend; implementation already landed in Task 3 — this task proves incrementality and rotation explicitly and fixes anything it flushes out)
 
-- [ ] **Step 1: Write the tests**
+- [x] **Step 1: Write the tests**
 
 ```python
 class IncrementalImportTests(unittest.TestCase):
@@ -783,7 +783,7 @@ class IncrementalImportTests(unittest.TestCase):
             self.assertIn("checkpoint_reset", {d.kind for d in run_two.diagnostics})
 ```
 
-- [ ] **Step 2: Run, fix anything these reveal, and commit**
+- [x] **Step 2: Run, fix anything these reveal, and commit**
 
 Run: `uv run python -m unittest tests.test_claude_code_history -v`
 Expected: PASS (Task 3 already implements this; if any test fails, fix `_resume_index`/`position()`/`finalize_stalled` until green — do not weaken the tests). The four new tests together prove D-013's guarantee end-to-end: a pending Bash call survives a checkpoint boundary and resolves correctly when its result arrives late, finalizes to `unknown` only after a full no-growth import cycle, and is never re-emitted or re-conflicted once finalized.
