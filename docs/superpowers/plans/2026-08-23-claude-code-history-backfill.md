@@ -4,7 +4,7 @@
 
 **Goal:** A consented, bounded, incremental `loopmetry history discover|preview|import --source claude-code` flow that converts existing local Claude Code session transcripts into canonical Loopmetry events with `history-backfill` provenance.
 
-**Architecture:** A `ClaudeCodeHistoryAdapter` implements the slice-1 `SourceAdapter` contract. Discovery is bounded to `~/.claude/projects/<encoded-project-root>/` for the current project only; every candidate is confirmed from content (session `cwd`), never from the lossy directory name alone. Parsing streams JSONL records, pairs `tool_use`/`tool_result` blocks, reuses the hook path's minimization helpers (extracted to a shared module first), counts unknown records as diagnostics, and writes canonical events to `.loopmetry/events/claude-code-history.jsonl` where the existing participant workflow already discovers them. Checkpoints make re-import incremental and idempotent.
+**Architecture:** A `ClaudeCodeHistoryAdapter` implements the slice-1 `SourceAdapter` contract. Discovery is bounded to `~/.claude/projects/<encoded-project-root>/` for the current project only; every candidate is confirmed from content (session `cwd`), never from the lossy directory name alone. Parsing streams JSONL records, pairs `tool_use`/`tool_result` blocks, reuses the hook path's minimization helpers (extracted to a shared module first), counts unknown records as diagnostics, and writes canonical events to `.loopmetry/events/claude-code-history.jsonl` where the existing participant workflow already discovers them. Checkpoints make re-import incremental and idempotent, and — per D-013 — also carry unresolved `tool_use`/`tool_result` pairing state across import boundaries so a Bash call's outcome is written under its event ID at most once, only after it is either observed or confirmed stalled.
 
 **Tech Stack:** Python ≥3.12 stdlib only. Depends on slice 1 (`src/loopmetry/adapters/base.py`, `checkpoints.py`, `Event.provenance`, `CaptureMode.HISTORY_BACKFILL`) being merged.
 
@@ -404,12 +404,14 @@ git commit -m "feat: bounded discovery of Claude Code history sessions"
 | assistant `tool_use` named `Edit`/`Write`/`MultiEdit`/`NotebookEdit` with `file_path`/`notebook_path` | `file_change` `{path, action: "add"` when the tool is `Write` else `"modify"}`, actor `agent` |
 | assistant `tool_use` named `Bash` with `command`, paired with its later `tool_result` (`is_error` flag) | `command` `{command: <signature label>, status: "failed"` if `is_error` else `"success"`, command_sha256, tool_name: "Bash"}`, actor `tool`; plus `verification` / `error` events exactly as the hook path derives them (same signature table, same status mapping) |
 | assistant `tool_use` named `ExitPlanMode`/`TodoWrite`/`EnterPlanMode` | `plan` `{summary: "Agent created or updated a plan; plan text omitted."}`, actor `agent` |
-| unmatched `tool_use` with no `tool_result` by end of session | `command` with `status: "unknown"` (Bash only; other unmatched tools are dropped silently — they produced no evidence) |
+| unmatched Bash `tool_use` with no `tool_result` by end of session | **no event yet.** Stashed in the checkpoint's `pending` map (see D-013) and carried into the next import. Only finalized to `command(status="unknown")` — using the entry's originally-stored `record_index` so the event ID never changes — once an import observes the session has stalled (zero file growth since the position where the entry was left); a `stalled_tool_call` diagnostic is emitted alongside. While merely pending (not yet stalled), an `unresolved_tool_call` diagnostic is emitted instead, and no event is written. Other unmatched, non-Bash tools are dropped silently — they produced no evidence and have no result to pair against. |
 | any other record `type` | counted into one `unparsed_record`-style diagnostic per type: kind `"skipped_record_type"`, summary naming the type |
 | malformed JSON line | diagnostic kind `"unparsed_record"` |
 | line longer than `_MAX_RECORD_BYTES` | diagnostic kind `"truncated_input"`; coverage for `commands`/`file_changes` degrades to `PARTIAL` |
 
-Event IDs: `f"hist-{canonical_hash({'session': session_id, 'file': file_name, 'index': record_index, 'kind': kind, 'suffix': suffix})[:24]}"` — deterministic across re-imports. Coverage: categories from `capabilities()` at `FULL`, downgraded to `PARTIAL` when any `truncated_input`/`unparsed_record` diagnostics occurred; `requirements` and `commits` are absent (not claimable from transcripts alone).
+Event IDs: `f"hist-{canonical_hash({'session': session_id, 'file': file_name, 'index': record_index, 'kind': kind, 'suffix': suffix})[:24]}"` — deterministic across re-imports, using the record's original index even when the event is emitted on a later import (stalled Bash finalization). Coverage: categories from `capabilities()` at `FULL`, downgraded to `PARTIAL` when any `truncated_input`/`unparsed_record`/`unresolved_tool_call`/`stalled_tool_call` diagnostics occurred; `requirements` and `commits` are absent (not claimable from transcripts alone).
+
+**Checkpoint-boundary tool_use/tool_result pairing (D-013):** because Bash `command` events depend on pairing a `tool_use` with a `tool_result` that may arrive in a later append, and re-emitting a corrected event under an already-written `event_id` would raise `EventConflictError` on merge, an event's content is only ever written once — after the outcome is either observed or the session is confirmed stalled. See D-013 in `docs/decision-log.md` for the full rationale; the mechanics are in Tasks 3 and 4 below.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -556,13 +558,26 @@ Replace the `NotImplementedError` body. Structure (full code, following the even
             else {}
         )
         for candidate in candidates:
+            path = Path(candidate.candidate_id)
+            previous_position = positions.get(candidate.candidate_id)
+            start_index = _resume_index(previous_position, path, diagnostic_counts)
+            # A reset (start_index == 0 with a nonempty previous position) means the
+            # transcript rotated; its old pending state refers to record indexes that
+            # no longer mean anything in the new file, so it must not be restored.
+            reset = bool(previous_position) and start_index == 0
+            previous_records_read = 0 if reset else (previous_position or {}).get("records_read", 0)
+            pending_seed = {} if reset else (previous_position or {}).get("pending", {})
             session = _SessionParser(
-                path=Path(candidate.candidate_id),
+                path=path,
                 project_root=project_root,
                 project_id=project_id,
-                start_index=_resume_index(positions.get(candidate.candidate_id), Path(candidate.candidate_id), diagnostic_counts),
+                start_index=start_index,
+                pending_seed=pending_seed,
             )
             events.extend(session.parse())
+            events.extend(
+                session.finalize_stalled(previous_records_read=previous_records_read)
+            )
             for key, count in session.diagnostic_counts.items():
                 diagnostic_counts[key] = diagnostic_counts.get(key, 0) + count
             positions[candidate.candidate_id] = session.position()
@@ -588,15 +603,17 @@ Replace the `NotImplementedError` body. Structure (full code, following the even
         )
 ```
 
-`_SessionParser` is a small class in the same module holding the pairing state:
+`_SessionParser` is a small class in the same module holding the pairing state. Per D-013, it never emits a Bash `command` event speculatively — only once the outcome is observed, or once the session is confirmed stalled across an import boundary — so an `event_id` is written at most once with content that never changes afterward.
 
+- Constructor: `__init__(self, *, path, project_root, project_id, start_index, pending_seed: Mapping[str, Mapping[str, Any]])`. Copies `pending_seed` into `self.pending: dict[str, dict[str, Any]]` (keyed by `tool_use_id`, each entry `{"record_index": int, "command": str, "timestamp": str}`) instead of starting empty — this is what lets a `tool_result` arriving in a later append still find the `tool_use` it belongs to.
 - `parse()` streams lines with `enumerate`, skipping indexes below `start_index`; per line: length check (`len(line.encode("utf-8", errors="replace")) > _MAX_RECORD_BYTES` → count `("truncated_input", "oversized transcript record skipped")` and continue), `json.loads` failure → count `("unparsed_record", "malformed JSON line")`, non-`user`/`assistant` `type` → count `("skipped_record_type", f"records of type {record_type!r} are not imported")`.
-- User records: content string or all-`text`-block list and no `isMeta` → emit `human_intervention` with `hash_text(prompt)`/`len(prompt)`. Content list with `tool_result` blocks → for each block, pop `self.pending.get(tool_use_id)`; if it is a Bash entry, emit the command/verification/error events with status `"failed"` if `is_error` else `"success"`.
-- Assistant records: iterate `message.content` `tool_use` blocks. `Read`-like → emit `file_read` immediately (path via `safe_relative_path(value, str(self.project_root))`; unextractable path → count `("unextractable_path", ...)`). Edit-like → emit `file_change` (`action="add"` for `Write`, else `"modify"`). Plan tools → emit `plan`. `Bash` → stash `(command, record_index, timestamp)` in `self.pending[tool_use_id]`.
-- End of stream: for each still-pending Bash entry, emit `command` with `status="unknown"` (no verification/error).
+- User records: content string or all-`text`-block list and no `isMeta` → emit `human_intervention` with `hash_text(prompt)`/`len(prompt)`. Content list with `tool_result` blocks → for each block, pop `self.pending.get(tool_use_id)` (present either because this parser just stashed it, or because it was restored from `pending_seed`); if found and it is a Bash entry, emit the command/verification/error events with status `"failed"` if `is_error` else `"success"`, using the entry's stored `record_index` (not the current line index) for the event ID. If not found (already finalized as stalled in an earlier import, or never a Bash call), the `tool_result` is dropped — it has nothing left to pair with.
+- Assistant records: iterate `message.content` `tool_use` blocks. `Read`-like → emit `file_read` immediately (path via `safe_relative_path(value, str(self.project_root))`; unextractable path → count `("unextractable_path", ...)`). Edit-like → emit `file_change` (`action="add"` for `Write`, else `"modify"`). Plan tools → emit `plan`. `Bash` → stash `{"record_index": index, "command": command, "timestamp": timestamp}` in `self.pending[tool_use_id]`; emit nothing yet.
+- End of stream: `self.pending` is deliberately left as-is — `parse()` does **not** flush it. Finalization is a separate, explicit step (`finalize_stalled`) so it can compare against the checkpoint's growth history rather than assuming "end of this import" means "end of the session."
+- `finalize_stalled(self, *, previous_records_read: int) -> list[Event]`: for each entry still in `self.pending` whose `record_index < previous_records_read` (i.e., it was already pending *before* this import started, not newly added by this import) — meaning at least one full import cycle passed with the file never growing past that point — emit its `command(status="unknown")` event (plus no verification/error; unknown status has nothing to verify), count `("stalled_tool_call", "a Bash call's result never arrived; session appears stalled")`, and remove it from `self.pending`. Any entry that fails this check (added fresh in this import, i.e. `record_index >= previous_records_read`) stays in `self.pending` untouched, and instead counts `("unresolved_tool_call", "a Bash call is awaiting its result")`.
 - Command/verification/error derivation mirrors `hook_capture` exactly: `label, kind = command_signature(command)`; command data `{"command": label, "status": status, "command_sha256": hash_text(command), "tool_name": "Bash"}`; verification only when `kind` is not None with status map `{"success": "passed", "failed": "failed", "unknown": "skipped"}`; error event `{"code": "TOOL_EXIT_NONZERO", "message": f"{label} failed; output omitted."}` only when status is `"failed"`.
 - Every event is built through one `_event(...)` helper that fills the envelope: deterministic `event_id` (formula in the Interfaces block), `source=_EVENT_SOURCE`, `provenance` with `source_ref={"session_file": self.path.name, "record_index": index}`, timestamp from the record (fall back to the previous record's timestamp; if the first record has none, count `("unparsed_record", "record missing timestamp")` and skip), constructed via `Event.from_mapping` so schema validation applies.
-- `position()` returns `{"content_sha256": <sha256 of the first line>, "records_read": <total line count seen>}`; `_resume_index(saved, path, counts)` returns `saved["records_read"]` when the stored `content_sha256` still matches the file's current first line, else counts `("checkpoint_reset", "transcript rotated or replaced; re-importing from the start")` and returns 0.
+- `position()` returns `{"content_sha256": <sha256 of the first line>, "records_read": <total line count seen>, "pending": <self.pending, JSON-serializable as-is>}`; `_resume_index(saved, path, counts)` returns `saved.get("records_read", 0)` when the stored `content_sha256` still matches the file's current first line, else counts `("checkpoint_reset", "transcript rotated or replaced; re-importing from the start")` and returns 0 (a reset also drops `pending_seed` for that candidate — a rotated file's line indexes no longer mean anything, so any old pending state is stale and must not be restored).
 
 - [ ] **Step 4: Run tests to verify they pass, then the full suite**
 
@@ -653,6 +670,71 @@ class IncrementalImportTests(unittest.TestCase):
                 run_one.events[0].event_id, run_two.events[0].event_id
             )
 
+    def test_pending_bash_call_resolved_by_later_append_yields_one_correct_event(self) -> None:
+        """D-013: a tool_use at the checkpoint boundary must not lose its real result."""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "work" / "project"
+            root.mkdir(parents=True)
+            claude_home = Path(tmp) / "claude-home"
+            project_dir = claude_home / "projects" / encode_claude_project_dir(root)
+            tool_use = _assistant_tool_use(
+                "Bash", {"command": "uv run pytest"}, "t1", ""
+            )
+            tool_use["cwd"] = str(root)
+            path = _write_session(project_dir, "sess.jsonl", [tool_use])
+            adapter = ClaudeCodeHistoryAdapter(claude_home=claude_home)
+            context = DiscoveryContext(project_root=root)
+
+            run_one = adapter.import_candidates(adapter.discover(context), context)
+            self.assertEqual([e.type.value for e in run_one.events], [])
+            self.assertIn("unresolved_tool_call", {d.kind for d in run_one.diagnostics})
+
+            result = _user_tool_result("t1", "", is_error=False)
+            result["cwd"] = str(root)
+            result["timestamp"] = "2026-08-20T09:00:01Z"
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(result) + "\n")
+            run_two = adapter.import_candidates(
+                adapter.discover(context), context, checkpoint=run_one.checkpoint
+            )
+            by_type = {e.type.value: e for e in run_two.events}
+            self.assertEqual(by_type["command"].data["status"], "success")
+            self.assertNotIn("stalled_tool_call", {d.kind for d in run_two.diagnostics})
+
+    def test_stalled_bash_call_finalizes_to_unknown_only_after_no_growth(self) -> None:
+        """D-013: only finalize to unknown once an import cycle shows the file stopped growing."""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "work" / "project"
+            root.mkdir(parents=True)
+            claude_home = Path(tmp) / "claude-home"
+            project_dir = claude_home / "projects" / encode_claude_project_dir(root)
+            tool_use = _assistant_tool_use(
+                "Bash", {"command": "uv run pytest"}, "t1", ""
+            )
+            tool_use["cwd"] = str(root)
+            _write_session(project_dir, "sess.jsonl", [tool_use])
+            adapter = ClaudeCodeHistoryAdapter(claude_home=claude_home)
+            context = DiscoveryContext(project_root=root)
+
+            run_one = adapter.import_candidates(adapter.discover(context), context)
+            self.assertEqual([e.type.value for e in run_one.events], [])
+
+            # Nothing appended: the file has not grown since run_one left this entry pending.
+            run_two = adapter.import_candidates(
+                adapter.discover(context), context, checkpoint=run_one.checkpoint
+            )
+            by_type = {e.type.value: e for e in run_two.events}
+            self.assertEqual(by_type["command"].data["status"], "unknown")
+            self.assertIn("stalled_tool_call", {d.kind for d in run_two.diagnostics})
+
+            # A third import must not re-emit or conflict with the now-finalized event.
+            run_three = adapter.import_candidates(
+                adapter.discover(context), context, checkpoint=run_two.checkpoint
+            )
+            self.assertEqual(run_three.events, ())
+
     def test_rotated_transcript_resets_checkpoint_with_diagnostic(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "work" / "project"
@@ -684,7 +766,7 @@ class IncrementalImportTests(unittest.TestCase):
 - [ ] **Step 2: Run, fix anything these reveal, and commit**
 
 Run: `uv run python -m unittest tests.test_claude_code_history -v`
-Expected: PASS (Task 3 already implements this; if either test fails, fix `_resume_index`/`position()` until green — do not weaken the tests).
+Expected: PASS (Task 3 already implements this; if any test fails, fix `_resume_index`/`position()`/`finalize_stalled` until green — do not weaken the tests). The four new tests together prove D-013's guarantee end-to-end: a pending Bash call survives a checkpoint boundary and resolves correctly when its result arrives late, finalizes to `unknown` only after a full no-growth import cycle, and is never re-emitted or re-conflicted once finalized.
 
 ```bash
 git add tests/test_claude_code_history.py src/loopmetry/adapters/claude_code_history.py

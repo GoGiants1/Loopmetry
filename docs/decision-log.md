@@ -24,6 +24,7 @@ Statuses:
 | D-010 | 2026-08-22 | Accepted | Keep agent instructions navigational; store rationale in this decision log |
 | D-011 | 2026-08-23 | Accepted | Prospective hook capture and retrospective historical backfill are both first-class source paths |
 | D-012 | 2026-08-23 | Accepted | Hybrid auto mode bounds historical backfill to the assignment window by default; broader operational proposals deferred |
+| D-013 | 2026-08-24 | Accepted | Historical backfill checkpoints persist unresolved tool_use state; unknown-status events finalize only when a session has stalled |
 
 ---
 
@@ -144,6 +145,22 @@ Statuses:
 - if one of the deferred items is later accepted, it gets its own decision entry rather than rewriting this one.
 
 **Related:** `docs/decision-log.md` D-011, `docs/roadmap.md` milestone 2 slice 4, `docs/submission-workflow.md`
+
+---
+
+## D-013 — Historical backfill checkpoints persist unresolved tool_use state; unknown-status events finalize only when a session has stalled
+
+**Status:** Accepted
+**Context:** The slice-2 plan (`docs/superpowers/plans/2026-08-23-claude-code-history-backfill.md`, Task 3/4, written 2026-08-23) originally paired assistant `tool_use` blocks with their later `tool_result` using an in-memory dict scoped to one `_SessionParser` instance, and flushed any still-unresolved Bash call to a `command` event with `status="unknown"` at end-of-stream. Checkpoints (`src/loopmetry/adapters/checkpoints.py`, `Checkpoint.positions`) only stored `{"content_sha256", "records_read"}` — a line-count cursor, not parser state. Reviewed before Task 1 implementation began (2026-08-24), this design had two compounding defects: (1) a `tool_use` flushed to `unknown` at the end of one import has its line counted into `records_read`, so when the real `tool_result` arrives in a later append, the next import resumes past that line with a fresh, empty pending map — the result is silently dropped and the `unknown` status can never be corrected; (2) even if pending state were restored, re-emitting a corrected event under the same `event_id` as the earlier `unknown` placeholder would hit `event_merge.merge_events`'s conflict check (differing `data` under the same ID raises `EventConflictError`, per PR #7's merged dual-source foundation), so "emit unknown now, fix it later" is structurally incompatible with the existing merge contract.
+**Decision:** `Checkpoint.positions` per-candidate entries gain a `pending` map (`{tool_use_id: {"record_index", "command", "timestamp"}}`, defaulting to `{}` for backward compatibility) that carries unresolved Bash `tool_use` state across imports. `_SessionParser` seeds its pending map from this stored state instead of starting empty. At end-of-stream, unresolved entries are written back into `pending` unchanged — no event is emitted for them yet. A pending entry is only finalized to a `command(status="unknown")` event (using its originally-stored `record_index`, so the event ID stays stable) when an import observes zero file growth since the position where that entry was left; if the file grew but the entry is still unresolved, it is carried forward again without guessing. Two new diagnostic kinds make both states visible: `unresolved_tool_call` (still pending, not a failure) and `stalled_tool_call` (finalized to `unknown`); both degrade the `commands` coverage category to `partial`, consistent with the plan's existing coverage-degradation rule.
+**Consequences:**
+
+- An event ID for a Bash outcome is written to disk exactly once, after either its real `tool_result` is observed or a full import cycle passes with zero growth while it was pending — content under that ID never changes afterward, so no `EventConflictError` is possible from this code path on re-ingest.
+- `Checkpoint`/`checkpoint_path`/`load_checkpoint`/`save_checkpoint` need no code changes; `positions` was already an arbitrary per-candidate JSON object.
+- The plan document's Task 3 event table, `_SessionParser` prose, and `import_candidates` sketch, and Task 4's incremental-import tests, are revised before Task 1 (`minimize.py` extraction) begins, so the checkpoint-pairing design is implemented correctly the first time.
+- Subagent transcripts and Codex sessions inherit the same pending/finalization contract when their adapters are added (slices covering D-011's remaining scope); this is not itself a new decision, just the existing D-011 contract applied consistently.
+
+**Related:** `docs/decision-log.md` D-011, `docs/superpowers/plans/2026-08-23-claude-code-history-backfill.md`, `src/loopmetry/adapters/base.py` (`Checkpoint`), `src/loopmetry/adapters/checkpoints.py`, `src/loopmetry/event_merge.py`
 
 ---
 
