@@ -925,12 +925,12 @@ In `_build_parser` add:
 
 Add a `_run_history(args)` handler implementing the Interfaces contract: build `DiscoveryContext(project_root=Path(args.root), since=_parse_since(args.since), interactive=sys.stdin.isatty())`, instantiate `ClaudeCodeHistoryAdapter(claude_home=...)` with the env override, then dispatch on `args.history_command`. `_parse_since` parses `YYYY-MM-DD` into a UTC-midnight datetime and raises a CLI error otherwise. Import path: consent gate first (TTY prompt printing `preview.session_count` and `preview.total_size_bytes` then reading `input()`; non-TTY requires `--yes`), `load_checkpoint` (catching `AdapterError` → print warning, use `None`), `import_candidates`, merge-with-existing via `load_jsonl` on the output file when it exists (catch `InputError` for a missing/empty file), dedupe by `event_id` preferring existing, sort, write atomically with the same pattern as `save_checkpoint`, then `save_checkpoint(root, run.checkpoint)` and print the summary. Wire `_run_history` into `main`'s command dispatch next to the existing commands.
 
-- [ ] **Step 4: Run the full suite and lint**
+- [x] **Step 4: Run the full suite and lint**
 
 Run: `uv run python -m unittest discover -s tests -v && uvx --from ruff==0.12.12 ruff check .`
 Expected: PASS / clean.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/loopmetry/cli.py tests/test_cli.py
