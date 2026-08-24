@@ -96,10 +96,12 @@ class EventStore:
         skipped = 0
         with self._connection:
             for event in events:
-                row = self._connection.execute(
-                    "SELECT * FROM events WHERE event_id = ?", (event.event_id,)
-                ).fetchone()
-                if row is None:
+                # Insert optimistically rather than SELECT-then-decide: a prior
+                # SELECT could see no row and still lose a race to a concurrent
+                # writer's INSERT for the same event_id before this one commits.
+                # Relying on the PRIMARY KEY constraint keeps insert-or-merge
+                # atomic regardless of other writers to this DB file.
+                try:
                     self._connection.execute(
                         """
                         INSERT INTO events (
@@ -124,9 +126,15 @@ class EventStore:
                             ),
                         ),
                     )
+                except sqlite3.IntegrityError:
+                    pass
+                else:
                     inserted += 1
                     continue
 
+                row = self._connection.execute(
+                    "SELECT * FROM events WHERE event_id = ?", (event.event_id,)
+                ).fetchone()
                 existing = self._row_to_event(row)
                 try:
                     merged_event = merge_events(existing, event)

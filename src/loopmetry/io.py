@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 from typing import Iterable
 
+from .event_merge import EventConflictError, merge_events
 from .schema import Event, SchemaError
 
 
@@ -20,8 +21,7 @@ def load_jsonl(path: str | Path) -> list[Event]:
     if not input_path.is_file():
         raise InputError(f"input path is not a file: {input_path}")
 
-    events: list[Event] = []
-    seen_ids: set[str] = set()
+    by_id: dict[str, Event] = {}
     with input_path.open("r", encoding="utf-8") as handle:
         for line_number, line in enumerate(handle, start=1):
             stripped = line.strip()
@@ -37,16 +37,26 @@ def load_jsonl(path: str | Path) -> list[Event]:
                 event = Event.from_mapping(raw)
             except SchemaError as exc:
                 raise InputError(f"{input_path}:{line_number}: {exc}") from exc
-            if event.event_id in seen_ids:
+            existing = by_id.get(event.event_id)
+            if existing is None:
+                by_id[event.event_id] = event
+                continue
+            # A repeated event_id within one file is not necessarily corrupt input:
+            # hook event IDs are a deterministic hash of their payload, so a retried,
+            # identical-looking hook invocation can genuinely append twice. Merge like
+            # any other overlapping observation (stable invariant 10); only a real
+            # content conflict is an error.
+            try:
+                by_id[event.event_id] = merge_events(existing, event)
+            except EventConflictError as exc:
                 raise InputError(
-                    f"{input_path}:{line_number}: duplicate event_id {event.event_id!r}"
-                )
-            seen_ids.add(event.event_id)
-            events.append(event)
+                    f"{input_path}:{line_number}: conflicting duplicate event_id "
+                    f"{event.event_id!r}"
+                ) from exc
 
-    if not events:
+    if not by_id:
         raise InputError(f"input file contains no events: {input_path}")
-    return sorted(events, key=lambda event: (event.timestamp, event.event_id))
+    return sorted(by_id.values(), key=lambda event: (event.timestamp, event.event_id))
 
 
 def select_project(events: Iterable[Event], project_id: str | None = None) -> list[Event]:

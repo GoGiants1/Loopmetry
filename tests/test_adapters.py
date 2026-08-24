@@ -175,6 +175,17 @@ def _hook_event(event_id: str, **overrides: object) -> dict:
 
 
 class HookSourceAdapterTests(unittest.TestCase):
+    def test_import_candidates_merges_same_file_duplicate_event_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            # A retried, identical-looking hook invocation produces the same
+            # deterministic event_id twice in one append-only file.
+            _write_hook_file(root, "claude-code.jsonl", [_hook_event("a"), _hook_event("a")])
+            adapter = HookSourceAdapter()
+            context = DiscoveryContext(project_root=root)
+            run = adapter.import_candidates(adapter.discover(context), context)
+            self.assertEqual(len(run.events), 1)
+
     def test_events_directory_file_is_not_a_hook_candidate(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

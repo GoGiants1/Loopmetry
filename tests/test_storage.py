@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
@@ -158,6 +159,38 @@ class EventStoreTests(unittest.TestCase):
                 self.assertIn("provenance_json", columns)
                 store.add_events([_event("evt-1", provenance=[])])
                 self.assertEqual(len(store.list_events("proj")), 1)
+
+    def test_concurrent_writers_do_not_crash_on_same_new_event_id(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            db_path = Path(directory) / "loopmetry.db"
+            event = _event(
+                "evt-1",
+                provenance=[
+                    {"source": "claude-code", "capture_mode": "hook", "adapter_version": "1.0.0"}
+                ],
+            )
+            barrier = threading.Barrier(2)
+            errors: list[BaseException] = []
+
+            def write() -> None:
+                try:
+                    barrier.wait()
+                    with EventStore(db_path) as store:
+                        store.add_events([event])
+                except BaseException as exc:  # noqa: BLE001 - captured for the assertion below
+                    errors.append(exc)
+
+            threads = [threading.Thread(target=write) for _ in range(2)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+
+            self.assertEqual(errors, [])
+            with EventStore(db_path) as store:
+                loaded = store.list_events("proj")
+            self.assertEqual(len(loaded), 1)
+            self.assertEqual(loaded[0].provenance, event.provenance)
 
 
 if __name__ == "__main__":
