@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import json as _json
 import os
 import unittest
+from unittest import mock
 
 from loopmetry.llm_provider import ProviderError, probe, _load_result_schema, _strip_numeric_constraints, validate_llm_evaluation_result, check_evidence_ids
+from loopmetry.llm_provider import evaluate
 
 
 class ProbeTests(unittest.TestCase):
@@ -137,6 +140,75 @@ class EvidenceIdCheckTests(unittest.TestCase):
         result["risks"][0]["evidence_ids"] = ["evt-999"]
         with self.assertRaises(ProviderError):
             check_evidence_ids(result, self._bundle())
+
+
+class EvaluateTests(unittest.TestCase):
+    def setUp(self) -> None:
+        os.environ["LOOPMETRY_TEST_KEY"] = "sk-fake"
+
+    def tearDown(self) -> None:
+        os.environ.pop("LOOPMETRY_TEST_KEY", None)
+
+    def _bundle(self) -> dict:
+        return {
+            "bundle_id": "sha256:" + "a" * 64,
+            "events": [{"event_id": "evt-1"}],
+        }
+
+    def test_missing_api_key_raises_before_any_network_call(self) -> None:
+        os.environ.pop("LOOPMETRY_TEST_KEY", None)
+        with mock.patch("urllib.request.urlopen") as mocked_urlopen:
+            with self.assertRaises(ProviderError):
+                evaluate(
+                    self._bundle(),
+                    "rubric text",
+                    api_key_env="LOOPMETRY_TEST_KEY",
+                )
+            mocked_urlopen.assert_not_called()
+
+    def test_happy_path_returns_validated_result_and_usage(self) -> None:
+        api_response = {
+            "model": "claude-opus-5",
+            "usage": {"input_tokens": 111, "output_tokens": 22},
+            "content": [{"type": "text", "text": _json.dumps(_valid_result())}],
+        }
+        fake_response = mock.MagicMock()
+        fake_response.read.return_value = _json.dumps(api_response).encode("utf-8")
+        fake_response.__enter__.return_value = fake_response
+        fake_response.__exit__.return_value = False
+
+        with mock.patch("urllib.request.urlopen", return_value=fake_response):
+            outcome = evaluate(
+                self._bundle(),
+                "rubric text",
+                api_key_env="LOOPMETRY_TEST_KEY",
+            )
+
+        self.assertEqual(outcome["result"]["verdict"], "partial")
+        self.assertEqual(outcome["usage"], {"input_tokens": 111, "output_tokens": 22})
+        self.assertEqual(outcome["model"], "claude-opus-5")
+
+    def test_rubric_id_mismatch_raises(self) -> None:
+        mismatched = _valid_result()
+        mismatched["rubric_id"] = "some-other-rubric"
+        api_response = {
+            "model": "claude-opus-5",
+            "usage": {"input_tokens": 1, "output_tokens": 1},
+            "content": [{"type": "text", "text": _json.dumps(mismatched)}],
+        }
+        fake_response = mock.MagicMock()
+        fake_response.read.return_value = _json.dumps(api_response).encode("utf-8")
+        fake_response.__enter__.return_value = fake_response
+        fake_response.__exit__.return_value = False
+
+        with mock.patch("urllib.request.urlopen", return_value=fake_response):
+            with self.assertRaises(ProviderError):
+                evaluate(
+                    self._bundle(),
+                    "rubric text",
+                    api_key_env="LOOPMETRY_TEST_KEY",
+                    rubric_id="project-work-v1",
+                )
 
 
 if __name__ == "__main__":
