@@ -25,6 +25,7 @@ from loopmetry.adapters.checkpoints import (
     save_checkpoint,
 )
 from loopmetry.adapters.hook import HookSourceAdapter
+from loopmetry.schema import CaptureMode
 
 
 def _candidate(candidate_id: str, size: int) -> SourceCandidate:
@@ -411,6 +412,30 @@ class HookSourceAdapterTests(unittest.TestCase):
             self.assertTrue(
                 all(value == Coverage.NONE for value in run.coverage.categories.values())
             )
+
+
+class CrossAdapterCapabilityTests(unittest.TestCase):
+    def test_claude_code_and_codex_report_comparable_capability_shapes(self) -> None:
+        from loopmetry.adapters.claude_code_history import ClaudeCodeHistoryAdapter
+        from loopmetry.adapters.codex_history import CodexHistoryAdapter
+
+        claude_caps = ClaudeCodeHistoryAdapter().capabilities()
+        codex_caps = CodexHistoryAdapter().capabilities()
+        self.assertTrue(set(claude_caps.evidence_categories) <= set(EVIDENCE_CATEGORIES))
+        self.assertTrue(set(codex_caps.evidence_categories) <= set(EVIDENCE_CATEGORIES))
+        self.assertIn(CaptureMode.HISTORY_BACKFILL, claude_caps.capture_modes)
+        self.assertIn(CaptureMode.HISTORY_BACKFILL, codex_caps.capture_modes)
+
+    def test_both_history_adapters_only_ever_report_valid_coverage_values(self) -> None:
+        from loopmetry.adapters.claude_code_history import ClaudeCodeHistoryAdapter
+        from loopmetry.adapters.codex_history import CodexHistoryAdapter
+
+        for adapter in (ClaudeCodeHistoryAdapter(), CodexHistoryAdapter()):
+            report = CoverageReport(
+                categories={c: Coverage.FULL for c in adapter.capabilities().evidence_categories}
+            )
+            round_tripped = CoverageReport.from_mapping(report.to_mapping())
+            self.assertEqual(round_tripped.categories, report.categories)
 
 
 if __name__ == "__main__":
