@@ -40,6 +40,18 @@ class EncodingTests(unittest.TestCase):
             encode_claude_project_dir(Path("/Users/w/my.app")), "-Users-w-my-app"
         )
 
+    def test_underscores_and_other_punctuation_become_dashes(self) -> None:
+        # Claude Code collapses every non-alphanumeric character to "-", not just
+        # "/" and "." (anthropics/claude-code#35162 reports "/", "-", and "_" all
+        # colliding to "-"); a project path with an underscore must still resolve
+        # to the same directory Claude Code itself would have created.
+        self.assertEqual(
+            encode_claude_project_dir(Path("/work/my_project")), "-work-my-project"
+        )
+        self.assertEqual(
+            encode_claude_project_dir(Path("/work/my project")), "-work-my-project"
+        )
+
 
 class DiscoveryTests(unittest.TestCase):
     def _setup(self, tmp: str) -> tuple[ClaudeCodeHistoryAdapter, DiscoveryContext, Path]:
@@ -320,6 +332,97 @@ class ImportTests(unittest.TestCase):
             )
             self.assertIn("window_widened", {d.kind for d in second.diagnostics})
 
+    def test_unbounded_then_narrow_then_unbounded_recovers_excluded_event(self) -> None:
+        # An unbounded import must not let a later narrower import permanently
+        # strand new content behind the cursor: going back to unbounded later
+        # must still recover whatever the narrow run's window excluded.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "work" / "project"
+            root.mkdir(parents=True)
+            claude_home = Path(tmp) / "claude-home"
+            project_dir = claude_home / "projects" / encode_claude_project_dir(root)
+            first_record = _record(
+                "user",
+                cwd=str(root),
+                timestamp="2026-08-01T00:00:00Z",
+                message={"role": "user", "content": "first"},
+            )
+            path = _write_session(project_dir, "sess.jsonl", [first_record])
+            adapter = ClaudeCodeHistoryAdapter(claude_home=claude_home)
+
+            unbounded = DiscoveryContext(project_root=root)
+            run_one = adapter.import_candidates(adapter.discover(unbounded), unbounded)
+            self.assertEqual(len(run_one.events), 1)
+
+            new_record = _record(
+                "user",
+                cwd=str(root),
+                timestamp="2026-08-20T00:00:00Z",
+                message={"role": "user", "content": "new but excluded by the narrow run"},
+            )
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(new_record) + "\n")
+
+            narrow = DiscoveryContext(
+                project_root=root, since=datetime(2999, 1, 1, tzinfo=timezone.utc)
+            )
+            run_two = adapter.import_candidates(
+                adapter.discover(narrow), narrow, checkpoint=run_one.checkpoint
+            )
+            self.assertEqual(run_two.events, ())
+
+            run_three = adapter.import_candidates(
+                adapter.discover(unbounded), unbounded, checkpoint=run_two.checkpoint
+            )
+            timestamps = sorted(e.timestamp.isoformat() for e in run_three.events)
+            self.assertIn("2026-08-20T00:00:00+00:00", timestamps)
+
+    def test_parallel_tool_use_in_one_record_gets_distinct_event_ids(self) -> None:
+        # A single assistant turn can contain multiple tool_use blocks (parallel
+        # tool use); they share a record index and must not collide.
+        run = self._import(
+            [
+                _assistant_tool_use("Bash", {"command": "pytest"}, "t1", ""),
+                _assistant_tool_use("Bash", {"command": "ruff check ."}, "t2", ""),
+                _user_tool_result("t1", "", is_error=False),
+                _user_tool_result("t2", "", is_error=True),
+            ]
+        )
+        commands = [e for e in run.events if e.type.value == "command"]
+        self.assertEqual(len(commands), 2)
+        self.assertEqual(len({e.event_id for e in commands}), 2)
+        by_label = {e.data["command"]: e for e in commands}
+        self.assertEqual(by_label["pytest"].data["status"], "success")
+        self.assertEqual(by_label["lint"].data["status"], "failed")
+
+    def test_incomplete_final_line_is_not_consumed_until_complete(self) -> None:
+        # A transcript being actively appended to can be read mid-write; the
+        # final line with no trailing newline must be deferred, not counted as a
+        # parse failure that permanently advances the cursor past it.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "work" / "project"
+            root.mkdir(parents=True)
+            claude_home = Path(tmp) / "claude-home"
+            project_dir = claude_home / "projects" / encode_claude_project_dir(root)
+            project_dir.mkdir(parents=True)
+            record = _record(
+                "user", cwd=str(root), message={"role": "user", "content": "hi"}
+            )
+            path = project_dir / "sess.jsonl"
+            path.write_text(json.dumps(record), encoding="utf-8")  # no trailing newline
+            adapter = ClaudeCodeHistoryAdapter(claude_home=claude_home)
+            context = DiscoveryContext(project_root=root)
+
+            run_one = adapter.import_candidates(adapter.discover(context), context)
+            self.assertEqual(run_one.events, ())
+
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write("\n")
+            run_two = adapter.import_candidates(
+                adapter.discover(context), context, checkpoint=run_one.checkpoint
+            )
+            self.assertEqual(len(run_two.events), 1)
+
 
 class IncrementalImportTests(unittest.TestCase):
     def test_second_import_with_checkpoint_only_reads_new_records(self) -> None:
@@ -417,6 +520,73 @@ class IncrementalImportTests(unittest.TestCase):
                 adapter.discover(context), context, checkpoint=run_two.checkpoint
             )
             self.assertEqual(run_three.events, ())
+
+    def test_pending_call_survives_an_unrelated_append_instead_of_finalizing(self) -> None:
+        # D-013 requires the file to NOT grow across an import cycle before a
+        # pending call is finalized to unknown -- an unrelated append (growth
+        # without this call's result) must keep it pending, not finalize it.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "work" / "project"
+            root.mkdir(parents=True)
+            claude_home = Path(tmp) / "claude-home"
+            project_dir = claude_home / "projects" / encode_claude_project_dir(root)
+            tool_use = _assistant_tool_use("Bash", {"command": "uv run pytest"}, "t1", "")
+            tool_use["cwd"] = str(root)
+            path = _write_session(project_dir, "sess.jsonl", [tool_use])
+            adapter = ClaudeCodeHistoryAdapter(claude_home=claude_home)
+            context = DiscoveryContext(project_root=root)
+
+            run_one = adapter.import_candidates(adapter.discover(context), context)
+            self.assertEqual(run_one.events, ())
+
+            unrelated = _record(
+                "user",
+                cwd=str(root),
+                timestamp="2026-08-20T09:00:30Z",
+                message={"role": "user", "content": "unrelated turn"},
+            )
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(unrelated) + "\n")
+            run_two = adapter.import_candidates(
+                adapter.discover(context), context, checkpoint=run_one.checkpoint
+            )
+            # The file grew, but not with t1's result: must stay pending, not unknown.
+            self.assertEqual([e.type.value for e in run_two.events], ["human_intervention"])
+            self.assertIn("unresolved_tool_call", {d.kind for d in run_two.diagnostics})
+            self.assertNotIn("stalled_tool_call", {d.kind for d in run_two.diagnostics})
+
+            result = _user_tool_result("t1", "", is_error=False)
+            result["cwd"] = str(root)
+            result["timestamp"] = "2026-08-20T09:01:00Z"
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(result) + "\n")
+            run_three = adapter.import_candidates(
+                adapter.discover(context), context, checkpoint=run_two.checkpoint
+            )
+            by_type = {e.type.value: e for e in run_three.events}
+            self.assertEqual(by_type["command"].data["status"], "success")
+
+    def test_checkpoint_never_stores_raw_command_text(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "work" / "project"
+            root.mkdir(parents=True)
+            claude_home = Path(tmp) / "claude-home"
+            project_dir = claude_home / "projects" / encode_claude_project_dir(root)
+            secret_command = 'curl -H "Authorization: Bearer super-secret-token" https://example.com'
+            tool_use = _assistant_tool_use("Bash", {"command": secret_command}, "t1", "")
+            tool_use["cwd"] = str(root)
+            _write_session(project_dir, "sess.jsonl", [tool_use])
+            adapter = ClaudeCodeHistoryAdapter(claude_home=claude_home)
+            context = DiscoveryContext(project_root=root)
+
+            run = adapter.import_candidates(adapter.discover(context), context)
+            checkpoint_text = json.dumps(run.checkpoint.to_mapping())
+            self.assertNotIn("super-secret-token", checkpoint_text)
+            self.assertNotIn(secret_command, checkpoint_text)
+            position = next(iter(run.checkpoint.positions.values()))
+            pending_entry = next(iter(position["pending"].values()))
+            self.assertIn("command_sha256", pending_entry)
+            self.assertNotIn("command", pending_entry)
 
     def test_rotated_transcript_resets_checkpoint_with_diagnostic(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

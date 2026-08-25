@@ -2,14 +2,16 @@
 
 Discovery is bounded to the encoded project directory for the current project root,
 and every candidate is confirmed from record content — the directory-name encoding
-is lossy (both "/" and "." become "-"), so it is never trusted on its own.
-Transcripts are streamed read-only and never copied; only canonical minimized
-events leave this module.
+is lossy (every non-alphanumeric character collapses to "-", per
+https://github.com/anthropics/claude-code/issues/35162), so it is never trusted on
+its own. Transcripts are streamed read-only and never copied; only canonical
+minimized events leave this module.
 """
 
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -49,9 +51,19 @@ _VERIFICATION_STATUS_MAP = {
 }
 
 
+_NON_ALNUM_RE = re.compile(r"[^A-Za-z0-9]")
+
+
 def encode_claude_project_dir(project_root: Path) -> str:
+    # Claude Code collapses every non-alphanumeric character (not just "/") to
+    # "-" when deriving a project's transcript directory name — confirmed both
+    # from real local ~/.claude/projects/ directories on this machine (a "."
+    # inside a path segment becomes "-") and from anthropics/claude-code#35162
+    # (which reports "/", "-", and "_" all collapsing to "-", causing distinct
+    # paths to collide). Matching only "/" and "." here would silently fail to
+    # discover any project whose path contains "_", a space, ":", etc.
     resolved = str(Path(project_root).expanduser().resolve())
-    return resolved.replace("/", "-").replace(".", "-")
+    return _NON_ALNUM_RE.sub("-", resolved)
 
 
 def _cwd_in_scope(cwd: str, project_root: Path) -> bool:
@@ -193,30 +205,36 @@ class ClaudeCodeHistoryAdapter:
             rotated = bool(previous_position) and start_index == 0
             # The checkpoint's records_read advances past every line it reads,
             # regardless of since/until (the window is only applied to the final
-            # events list below). If a later import widens the window relative to
-            # what was previously requested, the earlier run's records_read would
-            # otherwise permanently hide events that were read once but filtered
-            # out and never written anywhere — so a widened window forces a full
-            # re-parse of this candidate, the same way a rotation does.
+            # events list below). That's only safe if a later import's window is
+            # fully contained in the window that most recently advanced the
+            # cursor — otherwise content already behind the cursor could still be
+            # excluded from every prior output. It is NOT enough to compare
+            # against the widest window ever requested: an unbounded import
+            # followed by a narrower one (which still advances the cursor over
+            # new content, just without emitting it) can permanently strand that
+            # content even though "unbounded" was seen before. So track the exact
+            # window the cursor last advanced under, and require the new window
+            # to be a subset of it; otherwise force a full re-parse, same as a
+            # transcript rotation.
             previous_since = (
                 None if rotated or not previous_position else _parse_iso(previous_position.get("since"))
             )
             previous_until = (
                 None if rotated or not previous_position else _parse_iso(previous_position.get("until"))
             )
-            widened = bool(previous_position) and not rotated and _window_widened(
+            window_changed = bool(previous_position) and not rotated and not _window_is_subset(
                 context.since, context.until, previous_since, previous_until
             )
-            if widened:
+            if window_changed:
                 key = (
                     "window_widened",
-                    "the requested time window widened relative to a previous "
-                    "checkpoint; re-scanning the full transcript to recover "
-                    "previously out-of-window events",
+                    "the requested time window is not contained in the window "
+                    "used by the previous checkpoint advance; re-scanning the "
+                    "full transcript to recover potentially out-of-window events",
                 )
                 diagnostic_counts[key] = diagnostic_counts.get(key, 0) + 1
                 start_index = 0
-            reset = rotated or widened
+            reset = rotated or window_changed
             previous_records_read = (
                 0 if reset else (previous_position or {}).get("records_read", 0)
             )
@@ -235,13 +253,11 @@ class ClaudeCodeHistoryAdapter:
             for key, count in session.diagnostic_counts.items():
                 diagnostic_counts[key] = diagnostic_counts.get(key, 0) + count
             position = session.position()
-            if previous_position is None or rotated:
-                # Nothing to union with yet: this window is the only one on record.
-                position["since"] = _iso_or_none(context.since)
-                position["until"] = _iso_or_none(context.until)
-            else:
-                position["since"] = _widest_since(context.since, previous_since)
-                position["until"] = _widest_until(context.until, previous_until)
+            # Record the exact window this run's cursor advanced under (not a
+            # union with any prior window) — the next import's subset check must
+            # compare against this, not against history.
+            position["since"] = _iso_or_none(context.since)
+            position["until"] = _iso_or_none(context.until)
             positions[candidate.candidate_id] = position
         events = [event for event in events if _in_window(event, context)]
         diagnostics = tuple(
@@ -291,29 +307,19 @@ def _iso_or_none(value: datetime | None) -> str | None:
     return None if value is None else value.isoformat().replace("+00:00", "Z")
 
 
-def _window_widened(
+def _window_is_subset(
     since: datetime | None,
     until: datetime | None,
-    previous_since: datetime | None,
-    previous_until: datetime | None,
+    outer_since: datetime | None,
+    outer_until: datetime | None,
 ) -> bool:
-    # None means "unbounded on this side"; once unbounded has ever been seen for
-    # a side, nothing can widen it further on that side.
-    since_widened = previous_since is not None and (since is None or since < previous_since)
-    until_widened = previous_until is not None and (until is None or until > previous_until)
-    return since_widened or until_widened
+    """True if [since, until] could not include anything [outer_since, outer_until] excluded."""
 
-
-def _widest_since(since: datetime | None, previous_since: datetime | None) -> str | None:
-    if since is None or previous_since is None:
-        return None
-    return _iso_or_none(min(since, previous_since))
-
-
-def _widest_until(until: datetime | None, previous_until: datetime | None) -> str | None:
-    if until is None or previous_until is None:
-        return None
-    return _iso_or_none(max(until, previous_until))
+    if outer_since is not None and (since is None or since < outer_since):
+        return False
+    if outer_until is not None and (until is None or until > outer_until):
+        return False
+    return True
 
 
 def _first_line_hash(path: Path) -> str | None:
@@ -386,7 +392,15 @@ class _SessionParser:
         data: Mapping[str, Any],
         *,
         suffix: str,
+        tool_use_id: str | None = None,
     ) -> Event:
+        # `suffix` must already be unique per content block within the record
+        # (callers embed the block index into it) — a single assistant record
+        # can contain multiple tool_use blocks (parallel tool use is a normal,
+        # documented Claude Code shape), and record_index alone is shared by
+        # all of them, so relying on record_index+kind+suffix without a
+        # block-level discriminator would give two genuinely different tool
+        # calls the same event_id.
         stable = {
             "session": self.session_id,
             "file": self.path.name,
@@ -395,6 +409,12 @@ class _SessionParser:
             "suffix": suffix,
         }
         event_id = f"hist-{canonical_hash(stable)[:24]}"
+        source_ref: dict[str, Any] = {
+            "session_file": self.path.name,
+            "record_index": index,
+        }
+        if tool_use_id is not None:
+            source_ref["tool_use_id"] = tool_use_id
         return Event.from_mapping(
             {
                 "schema_version": "0.2",
@@ -411,10 +431,7 @@ class _SessionParser:
                         "source": _EVENT_SOURCE,
                         "capture_mode": "history-backfill",
                         "adapter_version": CLAUDE_HISTORY_ADAPTER_VERSION,
-                        "source_ref": {
-                            "session_file": self.path.name,
-                            "record_index": index,
-                        },
+                        "source_ref": source_ref,
                     }
                 ],
             }
@@ -426,6 +443,14 @@ class _SessionParser:
         try:
             with self.path.open("r", encoding="utf-8", errors="replace") as handle:
                 for index, line in enumerate(handle):
+                    if not line.endswith("\n"):
+                        # An active session keeps appending to this file; a final
+                        # line with no trailing newline may still be mid-write.
+                        # Stop here without counting or parsing it, so records_read
+                        # never advances past it — otherwise a line that completes
+                        # moments later would be permanently skipped by the next
+                        # import's start_index instead of being re-read once whole.
+                        break
                     line_count = index + 1
                     if index < self.start_index:
                         continue
@@ -532,13 +557,18 @@ class _SessionParser:
             # Already finalized as stalled in a previous import, or never a Bash call.
             return []
         status = "failed" if block.get("is_error") else "success"
-        return self._command_events(entry, status)
+        return self._command_events(entry, status, tool_use_id=tool_use_id)
 
-    def _command_events(self, entry: Mapping[str, Any], status: str) -> list[Event]:
-        command = str(entry["command"])
+    def _command_events(
+        self, entry: Mapping[str, Any], status: str, *, tool_use_id: str
+    ) -> list[Event]:
         record_index = int(entry["record_index"])
+        block_index = int(entry.get("block_index", 0))
         timestamp = str(entry["timestamp"])
-        label, kind = command_signature(command)
+        label = str(entry["command_label"])
+        command_sha256 = str(entry["command_sha256"])
+        kind = entry.get("verification_kind")
+        suffix_key = f"{record_index}-{block_index}"
         events = [
             self._event(
                 record_index,
@@ -548,10 +578,11 @@ class _SessionParser:
                 {
                     "command": label,
                     "status": status,
-                    "command_sha256": hash_text(command),
+                    "command_sha256": command_sha256,
                     "tool_name": "Bash",
                 },
-                suffix=f"command-{record_index}",
+                suffix=f"command-{suffix_key}",
+                tool_use_id=tool_use_id,
             )
         ]
         if kind and status != "unknown":
@@ -568,7 +599,8 @@ class _SessionParser:
                         "status": _VERIFICATION_STATUS_MAP[status],
                         "command": label,
                     },
-                    suffix=f"verification-{kind}-{record_index}",
+                    suffix=f"verification-{kind}-{suffix_key}",
+                    tool_use_id=tool_use_id,
                 )
             )
         if status == "failed":
@@ -582,7 +614,8 @@ class _SessionParser:
                         "code": "TOOL_EXIT_NONZERO",
                         "message": f"{label} failed; output omitted.",
                     },
-                    suffix=f"command-error-{record_index}",
+                    suffix=f"command-error-{suffix_key}",
+                    tool_use_id=tool_use_id,
                 )
             )
         return events
@@ -597,19 +630,24 @@ class _SessionParser:
         if not isinstance(content, list):
             return []
         events: list[Event] = []
-        for block in content:
+        for block_index, block in enumerate(content):
             if not isinstance(block, Mapping) or block.get("type") != "tool_use":
                 continue
-            events.extend(self._handle_tool_use(block, index, timestamp))
+            events.extend(self._handle_tool_use(block, index, block_index, timestamp))
         return events
 
     def _handle_tool_use(
-        self, block: Mapping[str, Any], index: int, timestamp: str
+        self, block: Mapping[str, Any], index: int, block_index: int, timestamp: str
     ) -> list[Event]:
+        # `block_index` (the tool_use block's position within this record's content
+        # list) disambiguates parallel tool calls in one assistant turn — a normal,
+        # documented shape — which otherwise share the same record `index`.
         name = str(block.get("name") or "")
         lowered = name.lower()
         tool_input = block.get("input")
         tool_input = tool_input if isinstance(tool_input, Mapping) else {}
+        tool_use_id = block.get("id")
+        tool_use_id = tool_use_id if isinstance(tool_use_id, str) else None
 
         if lowered in _READ_TOOLS:
             path = safe_relative_path(tool_input.get("file_path"), str(self.project_root))
@@ -623,7 +661,8 @@ class _SessionParser:
                     EventType.FILE_READ,
                     Actor.AGENT,
                     {"path": path},
-                    suffix=f"read-{index}-{path}",
+                    suffix=f"read-{index}-{block_index}-{path}",
+                    tool_use_id=tool_use_id,
                 )
             ]
 
@@ -641,7 +680,8 @@ class _SessionParser:
                     EventType.FILE_CHANGE,
                     Actor.AGENT,
                     {"path": path, "action": action},
-                    suffix=f"change-{index}-{path}",
+                    suffix=f"change-{index}-{block_index}-{path}",
+                    tool_use_id=tool_use_id,
                 )
             ]
 
@@ -653,17 +693,27 @@ class _SessionParser:
                     EventType.PLAN,
                     Actor.AGENT,
                     {"summary": "Agent created or updated a plan; plan text omitted."},
-                    suffix=f"plan-{index}",
+                    suffix=f"plan-{index}-{block_index}",
+                    tool_use_id=tool_use_id,
                 )
             ]
 
         if lowered == "bash":
-            tool_use_id = block.get("id")
             command = tool_input.get("command")
-            if isinstance(tool_use_id, str) and isinstance(command, str) and command.strip():
+            if tool_use_id is not None and isinstance(command, str) and command.strip():
+                # Minimize immediately: the pending map is serialized verbatim into
+                # the on-disk checkpoint JSON by position(), and a checkpoint is
+                # adapter state, not a canonical event — the raw command text (which
+                # can contain secrets, e.g. `curl -H "Authorization: Bearer $TOKEN"`)
+                # must never be written there, matching this module's "only
+                # canonical minimized events leave this module" contract.
+                label, verification_kind = command_signature(command)
                 self.pending[tool_use_id] = {
                     "record_index": index,
-                    "command": command,
+                    "block_index": block_index,
+                    "command_label": label,
+                    "command_sha256": hash_text(command),
+                    "verification_kind": verification_kind,
                     "timestamp": timestamp,
                 }
             return []
@@ -671,15 +721,25 @@ class _SessionParser:
         return []
 
     def finalize_stalled(self, *, previous_records_read: int) -> list[Event]:
+        # D-013 requires BOTH: the entry predates this import (it was already
+        # pending when this import started, not newly stashed by this parse), AND
+        # the file did not grow past where it was left — i.e. a full import cycle
+        # passed with zero new lines. An unrelated record appended in between (the
+        # file grew, but not with this call's result) must not finalize the call:
+        # its result could still arrive in a later append, and finalizing early
+        # here would drop that entry from `pending` before the real result ever
+        # has a chance to resolve it.
+        file_did_not_grow = self.total_lines == previous_records_read
         events: list[Event] = []
         for tool_use_id in list(self.pending):
             entry = self.pending[tool_use_id]
-            if entry["record_index"] < previous_records_read:
+            was_already_pending = entry["record_index"] < previous_records_read
+            if file_did_not_grow and was_already_pending:
                 self._count(
                     "stalled_tool_call",
                     "a Bash call's result never arrived; session appears stalled",
                 )
-                events.extend(self._command_events(entry, "unknown"))
+                events.extend(self._command_events(entry, "unknown", tool_use_id=tool_use_id))
                 del self.pending[tool_use_id]
             else:
                 self._count("unresolved_tool_call", "a Bash call is awaiting its result")

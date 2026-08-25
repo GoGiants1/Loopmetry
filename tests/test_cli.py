@@ -1,15 +1,20 @@
 from __future__ import annotations
 
+import contextlib
 import csv
+import io
 import json
 import os
+import stat
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
-from loopmetry.adapters.claude_code_history import encode_claude_project_dir
+from loopmetry.adapters.claude_code_history import ClaudeCodeHistoryAdapter, encode_claude_project_dir
+from loopmetry.cli import main
 from loopmetry.io import load_jsonl
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -270,6 +275,73 @@ class CliTests(unittest.TestCase):
             self.assertEqual(second.returncode, 0, second.stderr)
             output = root / ".loopmetry" / "events" / "claude-code-history.jsonl"
             self.assertEqual(len(load_jsonl(output)), 1)
+
+    def test_history_import_with_custom_output_does_not_chmod_its_parent(self) -> None:
+        # atomic_write_bytes must only lock down a directory Loopmetry itself
+        # just created (e.g. the default .loopmetry/events/), never a
+        # pre-existing, possibly shared directory a custom --output happens to
+        # live in -- even the project root itself, when --output is a bare
+        # relative filename.
+        with tempfile.TemporaryDirectory() as tmp:
+            root, claude_home = self._make_history_project(Path(tmp))
+            root.chmod(0o755)
+            before = stat.S_IMODE(root.stat().st_mode)
+            result = self.run_cli(
+                "history",
+                "import",
+                "--source",
+                "claude-code",
+                "--root",
+                str(root),
+                "--output",
+                str(root / "history.jsonl"),
+                "--yes",
+                env={**os.environ, "LOOPMETRY_CLAUDE_HOME": str(claude_home)},
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            after = stat.S_IMODE(root.stat().st_mode)
+            self.assertEqual(before, after)
+
+
+class HistoryConsentTests(unittest.TestCase):
+    """In-process tests for behavior mock.patch can observe (call counts)."""
+
+    def _make_history_project(self, tmp: Path) -> tuple[Path, Path]:
+        root = tmp / "work" / "project"
+        root.mkdir(parents=True)
+        claude_home = tmp / "claude-home"
+        project_dir = claude_home / "projects" / encode_claude_project_dir(root)
+        project_dir.mkdir(parents=True)
+        record = {
+            "type": "user",
+            "sessionId": "sess-1",
+            "timestamp": "2026-08-20T09:00:00Z",
+            "cwd": str(root),
+            "message": {"role": "user", "content": "hello"},
+        }
+        (project_dir / "sess.jsonl").write_text(json.dumps(record) + "\n", encoding="utf-8")
+        return root, claude_home
+
+    def test_import_without_yes_never_reads_transcripts_when_not_interactive(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root, claude_home = self._make_history_project(Path(tmp))
+            with (
+                mock.patch.object(
+                    ClaudeCodeHistoryAdapter, "discover", autospec=True
+                ) as mock_discover,
+                mock.patch("sys.stdin.isatty", return_value=False),
+                mock.patch.dict(os.environ, {"LOOPMETRY_CLAUDE_HOME": str(claude_home)}),
+            ):
+                with contextlib.redirect_stderr(io.StringIO()):
+                    with self.assertRaises(SystemExit) as ctx:
+                        main(
+                            [
+                                "history", "import", "--source", "claude-code",
+                                "--root", str(root),
+                            ]
+                        )
+                self.assertEqual(ctx.exception.code, 2)
+            mock_discover.assert_not_called()
 
 
 if __name__ == "__main__":

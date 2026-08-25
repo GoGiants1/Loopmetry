@@ -41,11 +41,19 @@ def atomic_write_bytes(path: Path, payload: bytes) -> None:
     never be left half-written (e.g. a history adapter's imported events file).
     """
 
+    parent_already_existed = path.parent.exists()
     path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        path.parent.chmod(0o700)
-    except OSError:
-        pass
+    if not parent_already_existed:
+        # Only lock down a directory Loopmetry itself just created (e.g. the
+        # default .loopmetry/checkpoints/). A caller-supplied --output path's
+        # parent may be a pre-existing, possibly shared directory (even the
+        # project root itself); silently chmod-ing that out from under other
+        # users would be a surprising, disruptive side effect this function
+        # must never cause.
+        try:
+            path.parent.chmod(0o700)
+        except OSError:
+            pass
     descriptor, temp_name = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
     try:
         with os.fdopen(descriptor, "wb") as handle:

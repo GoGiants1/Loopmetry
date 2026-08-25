@@ -442,11 +442,10 @@ def _run_history(args: argparse.Namespace) -> int:
                 )
         return 0
 
-    candidates = adapter.discover(context)
-    preview = adapter.preview(candidates)
-    diagnostics = adapter.last_discovery_diagnostics
-
     if args.history_command == "preview":
+        candidates = adapter.discover(context)
+        preview = adapter.preview(candidates)
+        diagnostics = adapter.last_discovery_diagnostics
         if args.json:
             _write_output(
                 json.dumps(
@@ -486,6 +485,29 @@ def _run_history(args: argparse.Namespace) -> int:
         return 0
 
     if args.history_command == "import":
+        # Consent must be checked before any transcript content is read at all —
+        # discover() itself opens and JSON-parses the first lines of every
+        # candidate file to confirm its cwd, so calling it before this check
+        # would mean a rejected non-interactive run had already read local
+        # history. Interactive mode asks twice: once to scan at all, and again
+        # (with real counts) before actually importing.
+        if interactive:
+            scan_answer = input(
+                "Scan local Claude Code history for this project to preview "
+                "importable sessions? [y/N] "
+            ).strip().lower()
+            if scan_answer != "y":
+                print("import cancelled")
+                return 0
+        elif not args.yes:
+            raise InputError(
+                "loopmetry history import requires --yes when not run interactively "
+                "(this flag is the explicit consent to read local history)"
+            )
+
+        candidates = adapter.discover(context)
+        preview = adapter.preview(candidates)
+
         if interactive:
             print(
                 f"{preview.session_count} session(s), {preview.total_size_bytes} byte(s) "
@@ -495,11 +517,6 @@ def _run_history(args: argparse.Namespace) -> int:
             if answer != "y":
                 print("import cancelled")
                 return 0
-        elif not args.yes:
-            raise InputError(
-                "loopmetry history import requires --yes when not run interactively "
-                "(this flag is the explicit consent to read local history)"
-            )
 
         try:
             checkpoint = load_checkpoint(root, adapter.name)
