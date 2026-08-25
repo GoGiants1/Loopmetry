@@ -247,5 +247,70 @@ class LoadEventFilesWithDiagnosticsTests(unittest.TestCase):
             load_event_files_with_diagnostics([])
 
 
+class StrictFlagTests(unittest.TestCase):
+    def test_strict_true_default_manifest_has_no_source_coverage_key(self) -> None:
+        source = ROOT / "examples" / "demo_project.jsonl"
+        with tempfile.TemporaryDirectory() as directory:
+            artifacts = run_participant_workflow(
+                [source],
+                assignment_id="course-2026",
+                submitter_id="S001",
+                output_root=Path(directory) / "runs",
+            )
+            self.assertEqual(artifacts.source_diagnostics, ())
+            manifest = json.loads(artifacts.manifest_json.read_text(encoding="utf-8"))
+            self.assertNotIn("source_coverage", manifest)
+
+    def test_strict_false_tolerates_conflict_and_reports_it(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            first = root / "a.jsonl"
+            second = root / "b.jsonl"
+            _write_jsonl(
+                first,
+                [
+                    _base_event(
+                        provenance=[
+                            {
+                                "source": "claude-code",
+                                "capture_mode": "hook",
+                                "adapter_version": "1.0.0",
+                            }
+                        ],
+                        data={"summary": "from-hook"},
+                    )
+                ],
+            )
+            _write_jsonl(
+                second,
+                [
+                    _base_event(
+                        provenance=[
+                            {
+                                "source": "claude-code",
+                                "capture_mode": "history-backfill",
+                                "adapter_version": "1.0.0",
+                            }
+                        ],
+                        data={"summary": "from-history"},
+                    )
+                ],
+            )
+
+            artifacts = run_participant_workflow(
+                [first, second],
+                assignment_id="course-2026",
+                submitter_id="S001",
+                output_root=root / "runs",
+                strict=False,
+            )
+            self.assertEqual(len(artifacts.source_diagnostics), 1)
+            self.assertEqual(artifacts.source_diagnostics[0].kind, "adapter_conflict")
+            manifest = json.loads(artifacts.manifest_json.read_text(encoding="utf-8"))
+            self.assertEqual(manifest["source_coverage"]["mode"], "auto")
+            self.assertTrue(manifest["source_coverage"]["history_included"])
+            self.assertEqual(len(manifest["source_coverage"]["diagnostics"]), 1)
+
+
 if __name__ == "__main__":
     unittest.main()
