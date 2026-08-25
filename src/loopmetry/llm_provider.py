@@ -193,3 +193,25 @@ def validate_llm_evaluation_result(raw: Any) -> dict[str, Any]:
         raise ProviderError("needs_human_review must be a boolean")
 
     return dict(raw)
+
+
+def check_evidence_ids(result: dict[str, Any], bundle: dict[str, Any]) -> None:
+    """Raise ProviderError if any cited evidence ID is absent from the bundle."""
+
+    events = bundle.get("events")
+    if not isinstance(events, list):
+        raise ProviderError("bundle has no events array to check evidence against")
+    known_ids = {event.get("event_id") for event in events if isinstance(event, dict)}
+
+    cited: set[str] = set()
+    for dimension in result.get("dimensions", []):
+        cited.update(dimension.get("evidence_ids", []))
+        cited.update(dimension.get("counterevidence_ids", []))
+    for risk in result.get("risks", []):
+        cited.update(risk.get("evidence_ids", []))
+
+    unknown = cited - known_ids
+    if unknown:
+        raise ProviderError(
+            f"judge result cites evidence IDs not present in the bundle: {sorted(unknown)}"
+        )

@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import unittest
 
-from loopmetry.llm_provider import ProviderError, probe, _load_result_schema, _strip_numeric_constraints, validate_llm_evaluation_result
+from loopmetry.llm_provider import ProviderError, probe, _load_result_schema, _strip_numeric_constraints, validate_llm_evaluation_result, check_evidence_ids
 
 
 class ProbeTests(unittest.TestCase):
@@ -122,6 +122,21 @@ class ResultValidationTests(unittest.TestCase):
         del raw["dimensions"][0]["rating"]
         with self.assertRaises(ProviderError):
             validate_llm_evaluation_result(raw)
+
+
+class EvidenceIdCheckTests(unittest.TestCase):
+    def _bundle(self) -> dict:
+        return {"events": [{"event_id": "evt-1"}, {"event_id": "evt-2"}]}
+
+    def test_accepts_known_evidence_ids(self) -> None:
+        result = _valid_result()  # cites "evt-1" only
+        check_evidence_ids(result, self._bundle())  # must not raise
+
+    def test_rejects_unknown_evidence_id(self) -> None:
+        result = _valid_result()
+        result["risks"][0]["evidence_ids"] = ["evt-999"]
+        with self.assertRaises(ProviderError):
+            check_evidence_ids(result, self._bundle())
 
 
 if __name__ == "__main__":
