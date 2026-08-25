@@ -16,6 +16,7 @@ from unittest import mock
 from loopmetry.adapters.claude_code_history import ClaudeCodeHistoryAdapter, encode_claude_project_dir
 from loopmetry.cli import main
 from loopmetry.io import load_jsonl
+from loopmetry.llm_provider import ProviderError
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -549,53 +550,59 @@ class HistoryConsentTests(unittest.TestCase):
 
 
 class JudgeCommandTests(unittest.TestCase):
+    @staticmethod
+    def _fake_result() -> dict:
+        return {
+            "schema_version": "0.1",
+            "rubric_id": "project-work-v1",
+            "scope": "project",
+            "verdict": "pass",
+            "summary": "ok",
+            "dimensions": [
+                {
+                    "key": "goal_fidelity",
+                    "label": "Goal fidelity",
+                    "assessability": "assessable",
+                    "rating": 4,
+                    "confidence": 1.0,
+                    "rationale": "matches",
+                    "evidence_ids": ["evt-1"],
+                    "counterevidence_ids": [],
+                    "missing_evidence": [],
+                }
+            ],
+            "risks": [],
+            "missing_evidence": [],
+            "needs_human_review": False,
+        }
+
+    def _make_fixtures(self, tmp_path: Path) -> tuple[Path, Path, Path]:
+        bundle_path = tmp_path / "bundle.json"
+        bundle_path.write_text(
+            json.dumps(
+                {
+                    "bundle_id": "sha256:" + "a" * 64,
+                    "project_id": "demo",
+                    "source_coverage": {"event_count": 1},
+                    "events": [{"event_id": "evt-1"}],
+                }
+            ),
+            encoding="utf-8",
+        )
+        rubric_path = tmp_path / "project-work-v1.md"
+        rubric_path.write_text("rubric text", encoding="utf-8")
+        output_path = tmp_path / "result.json"
+        return bundle_path, rubric_path, output_path
+
     def test_judge_writes_output_without_prompting_when_yes_is_passed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
-            bundle_path = tmp_path / "bundle.json"
-            bundle_path.write_text(
-                json.dumps(
-                    {
-                        "bundle_id": "sha256:" + "a" * 64,
-                        "project_id": "demo",
-                        "source_coverage": {"event_count": 1},
-                        "events": [{"event_id": "evt-1"}],
-                    }
-                ),
-                encoding="utf-8",
-            )
-            rubric_path = tmp_path / "project-work-v1.md"
-            rubric_path.write_text("rubric text", encoding="utf-8")
-            output_path = tmp_path / "result.json"
-
-            fake_result = {
-                "schema_version": "0.1",
-                "rubric_id": "project-work-v1",
-                "scope": "project",
-                "verdict": "pass",
-                "summary": "ok",
-                "dimensions": [
-                    {
-                        "key": "goal_fidelity",
-                        "label": "Goal fidelity",
-                        "assessability": "assessable",
-                        "rating": 4,
-                        "confidence": 1.0,
-                        "rationale": "matches",
-                        "evidence_ids": ["evt-1"],
-                        "counterevidence_ids": [],
-                        "missing_evidence": [],
-                    }
-                ],
-                "risks": [],
-                "missing_evidence": [],
-                "needs_human_review": False,
-            }
+            bundle_path, rubric_path, output_path = self._make_fixtures(tmp_path)
 
             with mock.patch(
                 "loopmetry.cli.evaluate",
                 return_value={
-                    "result": fake_result,
+                    "result": self._fake_result(),
                     "usage": {"input_tokens": 5, "output_tokens": 6},
                     "model": "claude-opus-5",
                 },
@@ -619,6 +626,89 @@ class JudgeCommandTests(unittest.TestCase):
             self.assertEqual(written["judge_run"]["rubric_id"], "project-work-v1")
             self.assertEqual(written["judge_run"]["usage"], {"input_tokens": 5, "output_tokens": 6})
             self.assertEqual(written["result"]["verdict"], "pass")
+
+    def test_judge_aborts_without_calling_evaluate_when_prompt_is_declined(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            bundle_path, rubric_path, output_path = self._make_fixtures(tmp_path)
+
+            with (
+                mock.patch("loopmetry.cli.evaluate") as mocked_evaluate,
+                mock.patch("builtins.input", return_value="n"),
+            ):
+                exit_code = main(
+                    [
+                        "judge",
+                        str(bundle_path),
+                        "--rubric",
+                        str(rubric_path),
+                        "--output",
+                        str(output_path),
+                    ]
+                )
+
+            self.assertNotEqual(exit_code, 0)
+            mocked_evaluate.assert_not_called()
+            self.assertFalse(output_path.exists())
+
+    def test_judge_proceeds_when_prompt_is_accepted_interactively(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            bundle_path, rubric_path, output_path = self._make_fixtures(tmp_path)
+
+            with (
+                mock.patch(
+                    "loopmetry.cli.evaluate",
+                    return_value={
+                        "result": self._fake_result(),
+                        "usage": {"input_tokens": 5, "output_tokens": 6},
+                        "model": "claude-opus-5",
+                    },
+                ) as mocked_evaluate,
+                mock.patch("builtins.input", return_value="y"),
+            ):
+                exit_code = main(
+                    [
+                        "judge",
+                        str(bundle_path),
+                        "--rubric",
+                        str(rubric_path),
+                        "--output",
+                        str(output_path),
+                    ]
+                )
+
+            self.assertEqual(exit_code, 0)
+            mocked_evaluate.assert_called_once()
+            written = json.loads(output_path.read_text(encoding="utf-8"))
+            self.assertEqual(written["judge_run"]["bundle_id"], "sha256:" + "a" * 64)
+            self.assertEqual(written["result"]["verdict"], "pass")
+
+    def test_judge_propagates_provider_error_as_exit_code_two(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            bundle_path, rubric_path, output_path = self._make_fixtures(tmp_path)
+
+            with mock.patch(
+                "loopmetry.cli.evaluate", side_effect=ProviderError("boom")
+            ) as mocked_evaluate:
+                with contextlib.redirect_stderr(io.StringIO()):
+                    with self.assertRaises(SystemExit) as ctx:
+                        main(
+                            [
+                                "judge",
+                                str(bundle_path),
+                                "--rubric",
+                                str(rubric_path),
+                                "--output",
+                                str(output_path),
+                                "--yes",
+                            ]
+                        )
+
+            self.assertEqual(ctx.exception.code, 2)
+            mocked_evaluate.assert_called_once()
+            self.assertFalse(output_path.exists())
 
 
 if __name__ == "__main__":
