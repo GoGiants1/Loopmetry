@@ -26,6 +26,7 @@ Statuses:
 | D-012 | 2026-08-23 | Accepted | Hybrid auto mode bounds historical backfill to the assignment window by default; broader operational proposals deferred |
 | D-013 | 2026-08-24 | Accepted | Historical backfill checkpoints persist unresolved tool_use state; unknown-status events finalize only when a session has stalled |
 | D-014 | 2026-08-25 | Accepted | Hook-config installer merges structurally and gates any existing-file modification behind `--force` with a mandatory backup |
+| D-015 | 2026-08-26 | Accepted | Codex hook-config writes via text-templated block replacement, not TOML serialization |
 
 ---
 
@@ -178,6 +179,21 @@ Statuses:
 - An initial implementation of this entry used a single shell-parsed command string and prefix-based ownership matching; external review before merge found both unsafe (a changed `--project-id` created a second, conflicting hook handler instead of replacing the first, and `--remove` could delete unrelated user-authored hooks matching only by command prefix). Both were corrected before merge, so this entry describes the corrected design directly rather than superseding itself.
 
 **Related:** `docs/decision-log.md` D-011, `docs/hook-capture.md`, `docs/roadmap.md` milestone 2 slice 3, `src/loopmetry/hook_integration.py`, `src/loopmetry/cli.py`, `src/loopmetry/adapters/checkpoints.py`
+
+---
+
+## D-015 — Codex hook-config writes via text-templated block replacement, not TOML serialization
+
+**Status:** Accepted
+**Context:** Milestone 2 slice 5 (`docs/roadmap.md`) needed `loopmetry integrate codex --preview|--apply|--remove` for `.codex/config.toml`, but no stdlib TOML writer exists (only read-only `tomllib`), and D-014 explicitly deferred this design. Codex's hook `command` field is also a single shell-parsed string with no `args` array, unlike Claude Code's JSON installer's exec-form handlers (confirmed against `docs/hook-capture.md`'s existing example and external Codex hooks documentation).
+**Decision:** `hook_integration_codex.py` never re-serializes the whole file. `tomllib` parses the whole file once to validate it's well-formed TOML and that `hooks`/each targeted event's value has the right shape (hard error otherwise, on preview/apply/remove alike, matching D-014's fail-closed rule). Ownership of an existing `[[hooks.<Event>]]` occurrence is decided by parsing just that occurrence's own text span in isolation via `tomllib` (every such span is independently valid TOML on its own) and checking it structurally matches exactly what this installer generates. Writing replaces only the byte spans of owned blocks — appending a fresh block when something changed — leaving every other byte of the file (comments, formatting, unrelated tables) untouched. `--project-id` is embedded via `shlex.quote()` into the single command string rather than passed as a separate argument, since the shell (not `execve`) splits Codex's `command` field.
+**Consequences:**
+
+- `merge_config`/`remove_config` take and return raw text, not a parsed structure — different shape from `hook_integration.py`'s dict-based `merge_settings`/`remove_settings`; `cli.py`'s `_run_integrate` dispatches by source into two small source-specific functions that both delegate to a shared `_finish_integrate` for the preview/force/backup/write flow.
+- A block whose text doesn't match our exact generated shape (extra keys, a `matcher`-equivalent, hand edits) is never treated as ours and is never touched by `--remove`, mirroring D-014's ownership rule for the JSON installer.
+- If Codex's config schema changes to support an exec-form `args` array in the future, this decision (single shell-string + `shlex.quote`) would need a superseding entry, not a silent rewrite.
+
+**Related:** `docs/decision-log.md` D-011, D-014, `docs/hook-capture.md`, `docs/roadmap.md` milestone 2 slice 5, `src/loopmetry/hook_integration_codex.py`, `src/loopmetry/cli.py`
 
 ---
 
