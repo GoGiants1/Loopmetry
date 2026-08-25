@@ -18,6 +18,7 @@ from . import __version__
 from .adapters.base import AdapterError, DiscoveryContext
 from .adapters.checkpoints import atomic_write_bytes, load_checkpoint, save_checkpoint
 from .adapters.claude_code_history import ClaudeCodeHistoryAdapter
+from .adapters.codex_history import CodexHistoryAdapter
 from .admin_server import (
     DEFAULT_ADMIN_BIND,
     DEFAULT_ADMIN_PORT,
@@ -51,7 +52,23 @@ from .submission import (
 from .workflow import discover_event_files, run_participant_workflow
 
 DEFAULT_CLAUDE_HOME_ENV = "LOOPMETRY_CLAUDE_HOME"
-_HISTORY_ADAPTERS: dict[str, type] = {"claude-code": ClaudeCodeHistoryAdapter}
+DEFAULT_CODEX_HOME_ENV = "LOOPMETRY_CODEX_HOME"
+_HISTORY_ADAPTERS: dict[str, type] = {
+    "claude-code": ClaudeCodeHistoryAdapter,
+    "codex": CodexHistoryAdapter,
+}
+_HOME_ENV_BY_SOURCE: dict[str, str] = {
+    "claude-code": DEFAULT_CLAUDE_HOME_ENV,
+    "codex": DEFAULT_CODEX_HOME_ENV,
+}
+_HOME_KWARG_BY_SOURCE: dict[str, str] = {
+    "claude-code": "claude_home",
+    "codex": "codex_home",
+}
+_DEFAULT_OUTPUT_NAME: dict[str, str] = {
+    "claude-code": "claude-code-history.jsonl",
+    "codex": "codex-history.jsonl",
+}
 
 DEFAULT_DB = Path(".loopmetry/loopmetry.db")
 DEFAULT_ADMIN_DB = Path(".loopmetry/admin.db")
@@ -485,9 +502,9 @@ def _run_history(args: argparse.Namespace) -> int:
     since = _parse_since(args.since)
     interactive = sys.stdin.isatty()
     context = DiscoveryContext(project_root=root, since=since, interactive=interactive)
-    claude_home_raw = os.environ.get(DEFAULT_CLAUDE_HOME_ENV)
-    claude_home = Path(claude_home_raw).expanduser() if claude_home_raw else None
-    adapter = _HISTORY_ADAPTERS[args.source](claude_home=claude_home)
+    home_raw = os.environ.get(_HOME_ENV_BY_SOURCE[args.source])
+    home = Path(home_raw).expanduser() if home_raw else None
+    adapter = _HISTORY_ADAPTERS[args.source](**{_HOME_KWARG_BY_SOURCE[args.source]: home})
 
     if args.history_command == "discover":
         candidates = adapter.discover(context)
@@ -605,7 +622,7 @@ def _run_history(args: argparse.Namespace) -> int:
         output_path = (
             Path(args.output).expanduser()
             if args.output
-            else root / ".loopmetry" / "events" / "claude-code-history.jsonl"
+            else root / ".loopmetry" / "events" / _DEFAULT_OUTPUT_NAME[args.source]
         )
         # Fail closed: a corrupt or unparsable existing output file must never be
         # treated as "no prior evidence" and silently overwritten with only this
