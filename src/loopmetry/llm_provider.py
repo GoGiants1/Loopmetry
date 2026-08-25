@@ -74,6 +74,15 @@ _SCOPES = {"session", "requirement", "project"}
 _ASSESSABILITY = {"assessable", "partially_assessable", "not_assessable"}
 _SEVERITIES = {"low", "medium", "high", "critical"}
 _DIMENSION_KEY_RE = re.compile(r"^[a-z][a-z0-9_]{1,63}$")
+_ALLOWED_TOP_LEVEL_KEYS = {
+    "schema_version", "rubric_id", "scope", "verdict", "summary",
+    "dimensions", "risks", "missing_evidence", "needs_human_review",
+}
+_ALLOWED_DIMENSION_KEYS = {
+    "key", "label", "assessability", "rating", "confidence",
+    "rationale", "evidence_ids", "counterevidence_ids", "missing_evidence",
+}
+_ALLOWED_RISK_KEYS = {"severity", "description", "evidence_ids"}
 
 
 def _require_str(value: Any, field: str, *, max_len: int, min_len: int = 1) -> str:
@@ -101,13 +110,18 @@ def _require_evidence_ids(value: Any, field: str) -> list[str]:
 def _validate_dimension(dimension: Any) -> None:
     if not isinstance(dimension, dict):
         raise ProviderError("each dimension must be a JSON object")
+    extra = set(dimension.keys()) - _ALLOWED_DIMENSION_KEYS
+    if extra:
+        raise ProviderError(f"dimension has unexpected keys: {sorted(extra)}")
     key = dimension.get("key")
     if not isinstance(key, str) or not _DIMENSION_KEY_RE.fullmatch(key):
         raise ProviderError(f"dimension key {key!r} does not match the required pattern")
     _require_str(dimension.get("label"), "dimension.label", max_len=120)
     _require_enum(dimension.get("assessability"), "dimension.assessability", _ASSESSABILITY)
 
-    rating = dimension.get("rating")
+    if "rating" not in dimension:
+        raise ProviderError("dimension.rating is required (may be null, but the key must be present)")
+    rating = dimension["rating"]
     if rating is not None:
         if not isinstance(rating, int) or isinstance(rating, bool) or not (0 <= rating <= 4):
             raise ProviderError("dimension.rating must be an integer 0-4 or null")
@@ -132,6 +146,9 @@ def _validate_dimension(dimension: Any) -> None:
 def _validate_risk(risk: Any) -> None:
     if not isinstance(risk, dict):
         raise ProviderError("each risk must be a JSON object")
+    extra = set(risk.keys()) - _ALLOWED_RISK_KEYS
+    if extra:
+        raise ProviderError(f"risk has unexpected keys: {sorted(extra)}")
     _require_enum(risk.get("severity"), "risk.severity", _SEVERITIES)
     _require_str(risk.get("description"), "risk.description", max_len=1000)
     _require_evidence_ids(risk.get("evidence_ids"), "risk.evidence_ids")
@@ -142,6 +159,10 @@ def validate_llm_evaluation_result(raw: Any) -> dict[str, Any]:
 
     if not isinstance(raw, dict):
         raise ProviderError("judge result must be a JSON object")
+
+    extra = set(raw.keys()) - _ALLOWED_TOP_LEVEL_KEYS
+    if extra:
+        raise ProviderError(f"judge result has unexpected top-level keys: {sorted(extra)}")
 
     if raw.get("schema_version") != _SCHEMA_VERSION:
         raise ProviderError(f"judge result schema_version must be {_SCHEMA_VERSION!r}")

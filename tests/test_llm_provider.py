@@ -111,6 +111,18 @@ class ResultValidationTests(unittest.TestCase):
         raw["dimensions"][0]["rating"] = None
         validate_llm_evaluation_result(raw)  # must not raise
 
+    def test_rejects_unexpected_top_level_key(self) -> None:
+        raw = _valid_result()
+        raw["unexpected_field"] = "surprise"
+        with self.assertRaises(ProviderError):
+            validate_llm_evaluation_result(raw)
+
+    def test_rejects_dimension_missing_rating_key_entirely(self) -> None:
+        raw = _valid_result()
+        del raw["dimensions"][0]["rating"]
+        with self.assertRaises(ProviderError):
+            validate_llm_evaluation_result(raw)
+
 
 if __name__ == "__main__":
     unittest.main()
