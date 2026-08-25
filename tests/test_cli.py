@@ -303,6 +303,141 @@ class CliTests(unittest.TestCase):
             self.assertEqual(before, after)
 
 
+class IntegrateTests(unittest.TestCase):
+    def run_cli(
+        self,
+        *args: str,
+        stdin: str | None = None,
+        env: dict[str, str] | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [sys.executable, "-m", "loopmetry", *args],
+            cwd=ROOT,
+            text=True,
+            input=stdin,
+            capture_output=True,
+            check=False,
+            env=env,
+        )
+
+    def _settings_path(self, root: Path) -> Path:
+        return root / ".claude" / "settings.local.json"
+
+    def test_preview_on_missing_file_shows_diff_and_writes_nothing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            result = self.run_cli("integrate", "claude-code", "--root", str(root), "--preview")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("UserPromptSubmit", result.stdout)
+            self.assertFalse(self._settings_path(root).exists())
+
+    def test_apply_on_missing_file_creates_it_without_force(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            result = self.run_cli("integrate", "claude-code", "--root", str(root), "--apply")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            path = self._settings_path(root)
+            data = json.loads(path.read_text(encoding="utf-8"))
+            self.assertIn("UserPromptSubmit", data["hooks"])
+            self.assertFalse(path.with_name(path.name + ".bak").exists())
+
+    def test_reapply_is_noop_and_creates_no_backup(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.run_cli("integrate", "claude-code", "--root", str(root), "--apply")
+            second = self.run_cli("integrate", "claude-code", "--root", str(root), "--apply")
+            self.assertEqual(second.returncode, 0, second.stderr)
+            self.assertIn("no changes needed", second.stdout)
+            path = self._settings_path(root)
+            self.assertFalse(path.with_name(path.name + ".bak").exists())
+
+    def test_apply_on_existing_unrelated_file_without_force_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = self._settings_path(root)
+            path.parent.mkdir(parents=True)
+            original = json.dumps({"otherSetting": True})
+            path.write_text(original, encoding="utf-8")
+            result = self.run_cli("integrate", "claude-code", "--root", str(root), "--apply")
+            self.assertEqual(result.returncode, 2)
+            self.assertEqual(path.read_text(encoding="utf-8"), original)
+
+    def test_apply_with_force_merges_and_backs_up(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = self._settings_path(root)
+            path.parent.mkdir(parents=True)
+            original = json.dumps({"otherSetting": True})
+            path.write_text(original, encoding="utf-8")
+            result = self.run_cli(
+                "integrate", "claude-code", "--root", str(root), "--apply", "--force"
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            data = json.loads(path.read_text(encoding="utf-8"))
+            self.assertTrue(data["otherSetting"])
+            self.assertIn("UserPromptSubmit", data["hooks"])
+            backup = path.with_name(path.name + ".bak")
+            self.assertEqual(backup.read_text(encoding="utf-8"), original)
+
+    def test_corrupt_existing_json_fails_closed_for_all_modes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = self._settings_path(root)
+            path.parent.mkdir(parents=True)
+            path.write_text("{not valid json\n", encoding="utf-8")
+            original = path.read_text(encoding="utf-8")
+            for mode in ("--preview", "--apply", "--remove"):
+                result = self.run_cli(
+                    "integrate", "claude-code", "--root", str(root), mode, "--force"
+                )
+                self.assertEqual(result.returncode, 2, mode)
+                self.assertEqual(path.read_text(encoding="utf-8"), original)
+                self.assertFalse(path.with_name(path.name + ".bak").exists())
+
+    def test_remove_after_apply_strips_only_managed_blocks_and_requires_force(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.run_cli("integrate", "claude-code", "--root", str(root), "--apply")
+            without_force = self.run_cli(
+                "integrate", "claude-code", "--root", str(root), "--remove"
+            )
+            self.assertEqual(without_force.returncode, 2)
+
+            with_force = self.run_cli(
+                "integrate", "claude-code", "--root", str(root), "--remove", "--force"
+            )
+            self.assertEqual(with_force.returncode, 0, with_force.stderr)
+            path = self._settings_path(root)
+            data = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(data, {})
+            backup = path.with_name(path.name + ".bak")
+            self.assertTrue(backup.exists())
+
+    def test_remove_with_nothing_managed_is_noop(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = self._settings_path(root)
+            path.parent.mkdir(parents=True)
+            path.write_text(json.dumps({"otherSetting": True}), encoding="utf-8")
+            result = self.run_cli("integrate", "claude-code", "--root", str(root), "--remove")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("no changes needed", result.stdout)
+
+    def test_mutually_exclusive_modes_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            result = self.run_cli(
+                "integrate", "claude-code", "--root", str(root), "--preview", "--apply"
+            )
+            self.assertEqual(result.returncode, 2)
+
+    def test_source_codex_not_yet_supported(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            result = self.run_cli("integrate", "codex", "--root", str(root), "--preview")
+            self.assertEqual(result.returncode, 2)
+
+
 class HistoryConsentTests(unittest.TestCase):
     """In-process tests for behavior mock.patch can observe (call counts)."""
 

@@ -31,7 +31,26 @@ loopmetry history import --source claude-code --since 2026-08-01
 
 `preview` is read-only and lists candidate sessions and discovery diagnostics without importing anything. `import` requires consent — an interactive TTY confirms before reading, and a non-interactive run requires `--yes` (per invariant 10, `loopmetry run` never triggers a history read implicitly). `--since YYYY-MM-DD` narrows the discovery window. Imported events land in `.loopmetry/events/claude-code-history.jsonl` with `history-backfill` provenance, and a checkpoint under `.loopmetry/checkpoints/` makes re-import incremental — only new transcript content is re-read, and a Bash call's outcome is written at most once (see decision D-013 for why unresolved `tool_use`/`tool_result` pairs are carried across imports instead of guessed at eagerly).
 
-A planned `loopmetry integrate <source> --preview|--apply|--remove` command will generate the configurations below deterministically, previewing before writing and never overwriting an existing file without an explicit force option. Until it ships, use the manual examples that follow.
+`loopmetry integrate claude-code --preview|--apply|--remove` generates the configuration below deterministically instead of copy-pasting it by hand:
+
+```bash
+loopmetry integrate claude-code --preview   # show the exact diff, write nothing
+loopmetry integrate claude-code --apply     # write it (add --force if the file already exists)
+loopmetry integrate claude-code --remove    # strip only the managed blocks (add --force if the file already exists)
+```
+
+`--preview` never writes. `--apply` and `--remove` only require `--force` when
+`.claude/settings.local.json` already exists and the change would actually
+modify it; creating the file from scratch, or re-running a command that would
+produce no change, never requires `--force`. Any modification of an existing
+file first writes a backup to `settings.local.json.bak` (overwritten on each
+run). An existing file that isn't valid JSON is a hard error, never silently
+treated as empty. The merge is structural and idempotent: it adds one managed
+block per hook event without touching unrelated settings or other hooks
+already in the file, and `--remove` strips only those managed blocks. Pass
+`--project-id` to embed a fixed `--project-id` in the generated command
+(otherwise `capture-hook`'s own default derivation applies at hook-run time).
+`--source codex` is not yet supported (planned for the Codex-parity slice).
 
 ## Privacy boundary
 

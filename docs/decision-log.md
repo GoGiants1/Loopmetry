@@ -25,6 +25,7 @@ Statuses:
 | D-011 | 2026-08-23 | Accepted | Prospective hook capture and retrospective historical backfill are both first-class source paths |
 | D-012 | 2026-08-23 | Accepted | Hybrid auto mode bounds historical backfill to the assignment window by default; broader operational proposals deferred |
 | D-013 | 2026-08-24 | Accepted | Historical backfill checkpoints persist unresolved tool_use state; unknown-status events finalize only when a session has stalled |
+| D-014 | 2026-08-25 | Accepted | Hook-config installer merges structurally and gates any existing-file modification behind `--force` with a mandatory backup |
 
 ---
 
@@ -161,6 +162,21 @@ Statuses:
 - Subagent transcripts and Codex sessions inherit the same pending/finalization contract when their adapters are added (slices covering D-011's remaining scope); this is not itself a new decision, just the existing D-011 contract applied consistently.
 
 **Related:** `docs/decision-log.md` D-011, `docs/superpowers/plans/2026-08-23-claude-code-history-backfill.md`, `src/loopmetry/adapters/base.py` (`Checkpoint`), `src/loopmetry/adapters/checkpoints.py`, `src/loopmetry/event_merge.py`
+
+---
+
+## D-014 — Hook-config installer merges structurally and gates any existing-file modification behind `--force` with a mandatory backup
+
+**Status:** Accepted
+**Context:** Milestone 2 slice 3 (`docs/roadmap.md`) adds `loopmetry integrate claude-code --preview|--apply|--remove` to generate the `.claude/settings.local.json` hook block documented in `docs/hook-capture.md`, instead of participants copy-pasting it by hand. No prior art for local config merging, backup, or diff preview existed anywhere in `src/loopmetry/` (confirmed by an Explore pass before implementation). A rule was needed for when writing to a file participants may have already customized is safe to do without confirmation, consistent with the fail-closed precedent already established for the historical-backfill adapter (an existing output file that fails to parse is a hard error, never silently treated as empty).
+**Decision:** Writing to `.claude/settings.local.json` never requires `--force` when the file does not yet exist (nothing is at risk) or when the computed result is byte-identical to what's already there (a true no-op, e.g. re-running `--apply` after it already succeeded). It requires `--force` whenever the file exists and the write would actually change its content — this rule is uniform across `--apply` and `--remove`, not just `--apply`. Immediately before any such modifying write, the existing bytes are copied to `settings.local.json.bak` (a single backup, overwritten each run, not timestamped). An existing file that is not valid JSON, or whose top-level value is not a JSON object, is a hard error on `--preview`, `--apply`, and `--remove` alike — never silently overwritten. The merge itself is structural, not textual: each of the five documented hook events gets exactly one managed block (matched by an exact `command` string), added only if not already present; `--remove` strips only blocks matching that command signature and prunes resulting empty lists/keys, leaving all unrelated settings and hooks untouched.
+**Consequences:**
+
+- `src/loopmetry/hook_integration.py` holds pure merge/remove/format logic with no I/O, independently unit-tested; `cli.py`'s `_run_integrate` owns reading the existing file, diffing (`difflib`), the force/backup policy, and writing via the existing `atomic_write_bytes` (`src/loopmetry/adapters/checkpoints.py`).
+- `--source` accepts only `"claude-code"` for now; Codex hook integration is explicitly a later slice (roadmap milestone 2 slice 5, "Codex parity") and will need its own textual-merge design since no stdlib TOML writer exists — not solved by this entry.
+- Because the force/backup rule is uniform across apply and remove, a participant who runs `--remove` on a file they've since hand-edited is protected the same way an `--apply` would be.
+
+**Related:** `docs/decision-log.md` D-011, `docs/hook-capture.md`, `docs/roadmap.md` milestone 2 slice 3, `src/loopmetry/hook_integration.py`, `src/loopmetry/cli.py`, `src/loopmetry/adapters/checkpoints.py`
 
 ---
 
