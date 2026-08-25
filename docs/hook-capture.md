@@ -226,7 +226,7 @@ Captured hooks do not yet infer requirements or acceptance criteria from free-fo
 | File reads | Supported when path supplied | Supported when path supplied | Relative paths only |
 | File changes | Write/Edit/apply-patch family | apply-patch family (history)[^codex-history] | Patch body omitted |
 | Commands | Content-minimized label | Content-minimized label (status unknown in history)[^codex-history] | Full command omitted |
-| Test/lint/type/build/security checks | Heuristic command classification | Heuristic command classification (status unknown in history)[^codex-history] | Handles direct and bounded nested response status; ambiguity remains a gap |
+| Test/lint/type/build/security checks | Heuristic command classification | Hook capture only; history excludes verification evidence[^codex-history] | Handles direct and bounded nested response status; ambiguity remains a gap |
 | Errors | Tool failure or non-zero command | Hook capture only; history excludes exit-code signals[^codex-history] | Output body omitted |
 | Commits | Local HEAD after successful `git commit` | Same | Message and author omitted |
 | Requirements and acceptance criteria | Not inferred | Not inferred | Planned explicit importer |
