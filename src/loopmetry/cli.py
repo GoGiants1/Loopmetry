@@ -98,6 +98,45 @@ def _participant_source_files(args: argparse.Namespace) -> list[Path]:
     return discovered
 
 
+def _auto_source_files(args: argparse.Namespace, root: Path) -> list[Path]:
+    discovered = discover_event_files(root)
+    # A consented history import that finds zero sessions still writes its
+    # output file (so the checkpoint and prior-content invariants hold across
+    # repeated imports); an empty discovered file must not make an otherwise
+    # normal run fail, so it is excluded here rather than passed to the loader
+    # that treats "file with zero events" as an error for explicit --input.
+    discovered = [path for path in discovered if path.stat().st_size > 0]
+    explicit = [Path(path).expanduser() for path in args.input]
+    combined = {path.resolve() for path in (*discovered, *explicit)}
+    if not combined:
+        raise InputError(
+            f"no Loopmetry event files found below {root}, and no history was imported; "
+            "pass --input, configure capture hooks, or check --include-history"
+        )
+    return sorted(combined)
+
+
+def _maybe_import_history_for_auto(args: argparse.Namespace, root: Path) -> None:
+    interactive = sys.stdin.isatty()
+    if not interactive and not args.include_history:
+        # Non-interactive run --source auto without explicit consent: proceed
+        # with hook/explicit evidence only. Unlike history import, this is not
+        # an error -- run is the one-command path and must not abort a routine
+        # analysis over an omitted optional flag (roadmap milestone 2 slice 4).
+        return
+    context = DiscoveryContext(
+        project_root=root,
+        since=_parse_since(args.since),
+        until=_parse_until(args.until),
+        interactive=interactive,
+    )
+    claude_home_raw = os.environ.get(DEFAULT_CLAUDE_HOME_ENV)
+    claude_home = Path(claude_home_raw).expanduser() if claude_home_raw else None
+    adapter = ClaudeCodeHistoryAdapter(claude_home=claude_home)
+    output_path = root / ".loopmetry" / "events" / "claude-code-history.jsonl"
+    _consented_history_import(adapter, context, root, interactive=interactive, output_path=output_path)
+
+
 def _required_run_identity(args: argparse.Namespace) -> tuple[str, str]:
     assignment_id = (args.assignment_id or "").strip()
     submitter_id = (args.submitter_id or "").strip()
@@ -266,6 +305,26 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     run.add_argument("--output-root", default=".loopmetry/runs")
     run.add_argument("--timeout", type=float, default=30.0, help="Upload timeout in seconds.")
+    run.add_argument(
+        "--source",
+        choices=("auto",),
+        default=None,
+        help=(
+            "Use 'auto' to merge hook, explicit, and consented Claude Code "
+            "history evidence (default: hook/explicit only, unchanged)."
+        ),
+    )
+    run.add_argument(
+        "--since", default=None, help="YYYY-MM-DD lower bound for --source auto history discovery."
+    )
+    run.add_argument(
+        "--until", default=None, help="YYYY-MM-DD upper bound for --source auto history discovery."
+    )
+    run.add_argument(
+        "--include-history",
+        action="store_true",
+        help="Consent to reading local Claude Code history non-interactively under --source auto.",
+    )
 
     submit = subparsers.add_parser(
         "submit", help="Retry upload of an existing submission.json without re-running analysis."
@@ -413,6 +472,15 @@ def _parse_since(value: str | None) -> datetime | None:
         return datetime.strptime(value, "%Y-%m-%d").replace(tzinfo=timezone.utc)
     except ValueError as exc:
         raise InputError(f"--since must be YYYY-MM-DD, got {value!r}") from exc
+
+
+def _parse_until(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.strptime(value, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    except ValueError as exc:
+        raise InputError(f"--until must be YYYY-MM-DD, got {value!r}") from exc
 
 
 def _write_events_atomically(path: Path, events: Sequence[Event]) -> None:
@@ -796,7 +864,14 @@ def _run(args: argparse.Namespace) -> int:
 
     if args.command == "run":
         assignment_id, submitter_id = _required_run_identity(args)
-        source_files = _participant_source_files(args)
+        if args.source == "auto":
+            root = Path(args.root).expanduser()
+            _maybe_import_history_for_auto(args, root)
+            source_files = _auto_source_files(args, root)
+            strict = False
+        else:
+            source_files = _participant_source_files(args)
+            strict = True
         token = token_from_environment(args.token_env) if args.server else None
         artifacts = run_participant_workflow(
             source_files,
@@ -807,10 +882,14 @@ def _run(args: argparse.Namespace) -> int:
             server_url=args.server,
             submission_token=token,
             timeout_seconds=args.timeout,
+            strict=strict,
         )
         print(f"analysis complete: project={artifacts.report.project_id} run={artifacts.run_id}")
         print(f"HTML report: {artifacts.report_html}")
         print(f"submission file: {artifacts.submission_json}")
+        if artifacts.source_diagnostics:
+            summary = ", ".join(f"{d.kind}={d.count}" for d in artifacts.source_diagnostics)
+            print(f"source diagnostics: {summary}")
         if artifacts.receipt:
             duplicate = " duplicate" if artifacts.receipt.duplicate else ""
             print(
