@@ -41,12 +41,44 @@ class SchemaHandlingTests(unittest.TestCase):
                     "type": "array",
                     "items": {"type": "integer", "multipleOf": 2, "minimum": 0},
                 },
+                "summary": {
+                    "type": "string",
+                    "description": "A short summary.",
+                    "minLength": 1,
+                    "maxLength": 2000,
+                },
+                "risks": {
+                    "type": "array",
+                    "description": "Identified risks.",
+                    "minItems": 0,
+                    "maxItems": 20,
+                    "items": {"type": "string"},
+                },
+            },
+            "$defs": {
+                "evidenceIds": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "uniqueItems": True,
+                }
             },
         }
         stripped = _strip_numeric_constraints(schema)
         self.assertEqual(stripped["properties"]["rating"], {"type": ["integer", "null"]})
         self.assertEqual(stripped["properties"]["confidence"], {"type": "number"})
         self.assertEqual(stripped["properties"]["nested"]["items"], {"type": "integer"})
+        self.assertEqual(
+            stripped["properties"]["summary"],
+            {"type": "string", "description": "A short summary."},
+        )
+        self.assertEqual(
+            stripped["properties"]["risks"],
+            {"type": "array", "description": "Identified risks.", "items": {"type": "string"}},
+        )
+        self.assertEqual(
+            stripped["$defs"]["evidenceIds"],
+            {"type": "array", "items": {"type": "string"}},
+        )
 
     def test_load_result_schema_reads_the_real_schema_file(self) -> None:
         schema = _load_result_schema()
@@ -171,6 +203,31 @@ class EvaluateTests(unittest.TestCase):
             "model": "claude-opus-5",
             "usage": {"input_tokens": 111, "output_tokens": 22},
             "content": [{"type": "text", "text": _json.dumps(_valid_result())}],
+        }
+        fake_response = mock.MagicMock()
+        fake_response.read.return_value = _json.dumps(api_response).encode("utf-8")
+        fake_response.__enter__.return_value = fake_response
+        fake_response.__exit__.return_value = False
+
+        with mock.patch("urllib.request.urlopen", return_value=fake_response):
+            outcome = evaluate(
+                self._bundle(),
+                "rubric text",
+                api_key_env="LOOPMETRY_TEST_KEY",
+            )
+
+        self.assertEqual(outcome["result"]["verdict"], "partial")
+        self.assertEqual(outcome["usage"], {"input_tokens": 111, "output_tokens": 22})
+        self.assertEqual(outcome["model"], "claude-opus-5")
+
+    def test_happy_path_with_leading_thinking_block_still_succeeds(self) -> None:
+        api_response = {
+            "model": "claude-opus-5",
+            "usage": {"input_tokens": 111, "output_tokens": 22},
+            "content": [
+                {"type": "thinking", "thinking": ""},
+                {"type": "text", "text": _json.dumps(_valid_result())},
+            ],
         }
         fake_response = mock.MagicMock()
         fake_response.read.return_value = _json.dumps(api_response).encode("utf-8")

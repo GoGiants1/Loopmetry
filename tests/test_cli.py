@@ -651,6 +651,30 @@ class JudgeCommandTests(unittest.TestCase):
             mocked_evaluate.assert_not_called()
             self.assertFalse(output_path.exists())
 
+    def test_judge_aborts_cleanly_when_input_raises_eof(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            bundle_path, rubric_path, output_path = self._make_fixtures(tmp_path)
+
+            with (
+                mock.patch("loopmetry.cli.evaluate") as mocked_evaluate,
+                mock.patch("builtins.input", side_effect=EOFError),
+            ):
+                exit_code = main(
+                    [
+                        "judge",
+                        str(bundle_path),
+                        "--rubric",
+                        str(rubric_path),
+                        "--output",
+                        str(output_path),
+                    ]
+                )
+
+            self.assertNotEqual(exit_code, 0)
+            mocked_evaluate.assert_not_called()
+            self.assertFalse(output_path.exists())
+
     def test_judge_proceeds_when_prompt_is_accepted_interactively(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

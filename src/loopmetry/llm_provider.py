@@ -45,6 +45,8 @@ def _require_api_key(api_key_env: str) -> str:
     return key
 
 
+# Known limitation: resolves correctly only when running from a source checkout
+# (e.g. via `uv run`), not from an installed wheel. Acceptable for this experimental prototype.
 _SCHEMA_PATH = Path(__file__).resolve().parents[2] / "schemas" / "llm-evaluation-v1.schema.json"
 
 
@@ -52,18 +54,29 @@ def _load_result_schema() -> dict[str, Any]:
     return json.loads(_SCHEMA_PATH.read_text(encoding="utf-8"))
 
 
-def _strip_numeric_constraints(schema: Any) -> Any:
-    """Recursively remove minimum/maximum/multipleOf keys.
+_UNSUPPORTED_SCHEMA_KEYWORDS = (
+    "minimum", "maximum", "multipleOf",
+    "minLength", "maxLength",
+    "minItems", "maxItems", "uniqueItems",
+)
 
-    Anthropic structured outputs does not support numeric range constraints;
-    the caller re-validates ranges itself once the response is parsed.
+
+def _strip_numeric_constraints(schema: Any) -> Any:
+    """Recursively remove JSON-Schema keywords unsupported by Anthropic structured outputs.
+
+    Anthropic's structured-outputs API rejects numeric range constraints
+    (minimum, maximum, multipleOf), string-length constraints (minLength,
+    maxLength), and complex array constraints (minItems, maxItems,
+    uniqueItems). The caller re-validates all of these itself once the
+    response is parsed, so stripping them from the outbound schema costs
+    nothing in safety.
     """
 
     if isinstance(schema, dict):
         return {
             key: _strip_numeric_constraints(value)
             for key, value in schema.items()
-            if key not in ("minimum", "maximum", "multipleOf")
+            if key not in _UNSUPPORTED_SCHEMA_KEYWORDS
         }
     if isinstance(schema, list):
         return [_strip_numeric_constraints(item) for item in schema]
@@ -290,10 +303,13 @@ def _extract_result_json(response_body: dict[str, Any]) -> dict[str, Any]:
     content = response_body.get("content")
     if not isinstance(content, list) or not content:
         raise ProviderError("Anthropic API response had no content blocks")
-    first = content[0]
-    if not isinstance(first, dict) or first.get("type") != "text":
-        raise ProviderError("Anthropic API response's first content block was not text")
-    text = first.get("text")
+    text_block = next(
+        (block for block in content if isinstance(block, dict) and block.get("type") == "text"),
+        None,
+    )
+    if text_block is None:
+        raise ProviderError("Anthropic API response had no text content block")
+    text = text_block.get("text")
     if not isinstance(text, str):
         raise ProviderError("Anthropic API response text block had no text")
     try:

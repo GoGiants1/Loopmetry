@@ -869,7 +869,11 @@ def _run(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         if not args.yes:
-            reply = input("Continue? [y/N] ").strip().lower()
+            try:
+                reply = input("Continue? [y/N] ").strip().lower()
+            except (EOFError, OSError):
+                print("aborted: not interactive; pass --yes to confirm", file=sys.stderr)
+                return 1
             if reply not in ("y", "yes"):
                 print("aborted: pass --yes to skip this prompt", file=sys.stderr)
                 return 1
