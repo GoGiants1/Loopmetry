@@ -182,6 +182,37 @@ class ImportTests(unittest.TestCase):
         self.assertEqual(len(changes), 1)
         self.assertEqual(changes[0].data["path"], "src/app.py")
 
+    def test_apply_patch_multi_file_patch_emits_one_event_per_file(self) -> None:
+        patch = (
+            "*** Begin Patch\n"
+            "*** Update File: src/app.py\n"
+            "@@\n-old\n+new\n"
+            "*** Update File: src/other.py\n"
+            "@@\n-old2\n+new2\n"
+            "*** End Patch"
+        )
+        run, _ = self._import([_local_shell_call("call-2b", ["apply_patch", patch])])
+        changes = [e for e in run.events if e.type.value == "file_change"]
+        self.assertEqual(len(changes), 2)
+        self.assertEqual(
+            sorted(c.data["path"] for c in changes), ["src/app.py", "src/other.py"]
+        )
+
+    def test_apply_patch_add_file_header_sets_add_action(self) -> None:
+        patch = "*** Begin Patch\n*** Add File: src/new_file.py\n@@\n+new\n*** End Patch"
+        run, _ = self._import([_local_shell_call("call-2c", ["apply_patch", patch])])
+        changes = [e for e in run.events if e.type.value == "file_change"]
+        self.assertEqual(len(changes), 1)
+        self.assertEqual(changes[0].data["action"], "add")
+
+    def test_apply_patch_traversal_path_is_sanitized(self) -> None:
+        patch = "*** Begin Patch\n*** Update File: /etc/passwd\n@@\n-old\n+new\n*** End Patch"
+        run, _ = self._import([_local_shell_call("call-2d", ["apply_patch", patch])])
+        changes = [e for e in run.events if e.type.value == "file_change"]
+        self.assertEqual(len(changes), 1)
+        self.assertNotEqual(changes[0].data["path"], "/etc/passwd")
+        self.assertTrue(changes[0].data["path"].startswith("<external-path-redacted>/"))
+
     def test_function_call_and_output_pair_across_two_records(self) -> None:
         run, _ = self._import(
             [

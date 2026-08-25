@@ -25,7 +25,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
-from ..minimize import canonical_hash, command_signature, hash_text
+from ..minimize import canonical_hash, command_signature, hash_text, safe_relative_path
 from ..schema import Actor, CaptureMode, Event, EventType
 from .base import (
     AdapterCapabilities,
@@ -131,14 +131,23 @@ class CodexHistoryAdapter:
         return tuple(sorted(candidates, key=lambda c: c.label))
 
 
-_UPDATE_FILE_RE = re.compile(r"^\*\*\* (?:Update|Add) File: (.+)$", re.MULTILINE)
+_UPDATE_FILE_RE = re.compile(r"^\*\*\* (Update|Add) File: (.+)$", re.MULTILINE)
 
 
-def _patch_target_path(patch_text: str) -> str | None:
-    match = _UPDATE_FILE_RE.search(patch_text)
-    if not match:
-        return None
-    return match.group(1).strip() or None
+def _patch_target_paths(patch_text: str) -> list[tuple[str, str]]:
+    """Return (action, raw_path) pairs for every changed-file header in a patch.
+
+    action is "modify" for "Update File" headers and "add" for "Add File" headers.
+    """
+
+    results: list[tuple[str, str]] = []
+    for match in _UPDATE_FILE_RE.finditer(patch_text):
+        verb, raw_path = match.group(1), match.group(2).strip()
+        if not raw_path:
+            continue
+        action = "add" if verb == "Add" else "modify"
+        results.append((action, raw_path))
+    return results
 
 
 class _SessionParser:
@@ -152,11 +161,13 @@ class _SessionParser:
         *,
         path: Path,
         project_id: str,
+        project_root: Path,
         start_index: int,
         pending_seed: Mapping[str, Mapping[str, Any]],
     ) -> None:
         self.path = path
         self.project_id = project_id
+        self.project_root = project_root
         self.start_index = start_index
         self.pending: dict[str, dict[str, Any]] = {
             key: dict(value) for key, value in pending_seed.items()
@@ -311,28 +322,36 @@ class _SessionParser:
             "verification_kind": verification_kind,
             "timestamp": timestamp,
             "is_apply_patch": bool(command) and command[0] == "apply_patch",
-            "patch_target": _patch_target_path(command[1]) if len(command) > 1 and command[0] == "apply_patch" else None,
+            "patch_text": command[1] if len(command) > 1 and command[0] == "apply_patch" else None,
         }
 
     def _resolve(self, call_id: str, entry: Mapping[str, Any]) -> list[Event]:
         record_index = int(entry["record_index"])
         timestamp = str(entry["timestamp"])
         if entry.get("is_apply_patch"):
-            path = entry.get("patch_target")
-            if path is None:
+            patch_text = entry.get("patch_text")
+            headers = _patch_target_paths(patch_text) if isinstance(patch_text, str) else []
+            if not headers:
                 self._count("unextractable_path", "an apply_patch call's target path could not be extracted")
                 return []
-            return [
-                self._event(
-                    record_index,
-                    timestamp,
-                    EventType.FILE_CHANGE,
-                    Actor.AGENT,
-                    {"path": path, "action": "modify"},
-                    suffix=f"change-{record_index}-{path}",
-                    call_id=call_id,
+            events: list[Event] = []
+            for file_index, (action, raw_path) in enumerate(headers):
+                path = safe_relative_path(raw_path, str(self.project_root))
+                if path is None:
+                    self._count("unextractable_path", "an apply_patch call's target path could not be extracted")
+                    continue
+                events.append(
+                    self._event(
+                        record_index,
+                        timestamp,
+                        EventType.FILE_CHANGE,
+                        Actor.AGENT,
+                        {"path": path, "action": action},
+                        suffix=f"change-{record_index}-{file_index}-{path}",
+                        call_id=call_id,
+                    )
                 )
-            ]
+            return events
         self.emitted_command = True
         return [
             self._event(
