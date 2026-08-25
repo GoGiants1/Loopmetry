@@ -57,3 +57,18 @@ def merge_events(existing: Event, incoming: Event) -> Event:
     if not added:
         return existing
     return replace(existing, provenance=tuple(merged), schema_version=SCHEMA_VERSION)
+
+
+def merge_events_tolerant(existing: Event, incoming: Event) -> tuple[Event, bool]:
+    """Like merge_events, but a genuine content conflict returns (existing, True)
+    instead of raising EventConflictError.
+
+    Used only by the hybrid auto-merge path (D-011): a disagreement between a
+    hook observation and a history-backfill observation of the "same" event_id
+    must stay visible as a diagnostic, not abort the whole run. merge_events
+    itself is unchanged and keeps raising for same-adapter merges (history
+    import, plain `run`, ingest), where a conflict more likely means corruption.
+    """
+    if events_conflict(existing, incoming):
+        return existing, True
+    return merge_events(existing, incoming), False

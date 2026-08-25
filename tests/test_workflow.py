@@ -6,11 +6,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from loopmetry.adapters.base import Diagnostic
 from loopmetry.io import InputError
 from loopmetry.submission import load_submission
 from loopmetry.workflow import (
     discover_event_files,
     load_event_files,
+    load_event_files_with_diagnostics,
     run_participant_workflow,
 )
 
@@ -182,6 +184,179 @@ class ParticipantWorkflowTests(unittest.TestCase):
 
             with self.assertRaises(InputError):
                 load_event_files([first, second])
+
+
+class LoadEventFilesWithDiagnosticsTests(unittest.TestCase):
+    def test_no_conflicts_matches_load_event_files(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            first = root / "a.jsonl"
+            second = root / "b.jsonl"
+            _write_jsonl(first, [_base_event(event_id="evt-1")])
+            _write_jsonl(second, [_base_event(event_id="evt-2")])
+
+            events, diagnostics = load_event_files_with_diagnostics([first, second])
+            self.assertEqual(len(events), 2)
+            self.assertEqual(diagnostics, ())
+
+    def test_one_conflict_keeps_first_and_reports_one_diagnostic(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            first = root / "a.jsonl"
+            second = root / "b.jsonl"
+            _write_jsonl(first, [_base_event(data={"summary": "from-hook"})])
+            _write_jsonl(second, [_base_event(data={"summary": "from-history"})])
+
+            events, diagnostics = load_event_files_with_diagnostics([first, second])
+            self.assertEqual(len(events), 1)
+            self.assertEqual(events[0].data, {"summary": "from-hook"})
+            self.assertEqual(len(diagnostics), 1)
+            diagnostic = diagnostics[0]
+            self.assertIsInstance(diagnostic, Diagnostic)
+            self.assertEqual(diagnostic.kind, "adapter_conflict")
+            self.assertEqual(diagnostic.count, 1)
+            self.assertIn("evt-1", diagnostic.summary)
+
+    def test_multiple_conflicts_aggregate_into_one_diagnostic(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            first = root / "a.jsonl"
+            second = root / "b.jsonl"
+            _write_jsonl(
+                first,
+                [
+                    _base_event(event_id="evt-1", data={"summary": "a1"}),
+                    _base_event(event_id="evt-2", data={"summary": "a2"}),
+                ],
+            )
+            _write_jsonl(
+                second,
+                [
+                    _base_event(event_id="evt-1", data={"summary": "b1"}),
+                    _base_event(event_id="evt-2", data={"summary": "b2"}),
+                ],
+            )
+
+            events, diagnostics = load_event_files_with_diagnostics([first, second])
+            self.assertEqual(len(events), 2)
+            self.assertEqual(len(diagnostics), 1)
+            self.assertEqual(diagnostics[0].count, 2)
+
+    def test_empty_paths_still_raises(self) -> None:
+        with self.assertRaises(InputError):
+            load_event_files_with_diagnostics([])
+
+
+class StrictFlagTests(unittest.TestCase):
+    def test_strict_true_default_manifest_has_no_source_coverage_key(self) -> None:
+        source = ROOT / "examples" / "demo_project.jsonl"
+        with tempfile.TemporaryDirectory() as directory:
+            artifacts = run_participant_workflow(
+                [source],
+                assignment_id="course-2026",
+                submitter_id="S001",
+                output_root=Path(directory) / "runs",
+            )
+            self.assertEqual(artifacts.source_diagnostics, ())
+            manifest = json.loads(artifacts.manifest_json.read_text(encoding="utf-8"))
+            self.assertNotIn("source_coverage", manifest)
+
+    def test_strict_false_tolerates_conflict_and_reports_it(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            first = root / "a.jsonl"
+            second = root / "b.jsonl"
+            _write_jsonl(
+                first,
+                [
+                    _base_event(
+                        provenance=[
+                            {
+                                "source": "claude-code",
+                                "capture_mode": "hook",
+                                "adapter_version": "1.0.0",
+                            }
+                        ],
+                        data={"summary": "from-hook"},
+                    )
+                ],
+            )
+            _write_jsonl(
+                second,
+                [
+                    _base_event(
+                        provenance=[
+                            {
+                                "source": "claude-code",
+                                "capture_mode": "history-backfill",
+                                "adapter_version": "1.0.0",
+                            }
+                        ],
+                        data={"summary": "from-history"},
+                    )
+                ],
+            )
+
+            artifacts = run_participant_workflow(
+                [first, second],
+                assignment_id="course-2026",
+                submitter_id="S001",
+                output_root=root / "runs",
+                strict=False,
+            )
+            self.assertEqual(len(artifacts.source_diagnostics), 1)
+            self.assertEqual(artifacts.source_diagnostics[0].kind, "adapter_conflict")
+            manifest = json.loads(artifacts.manifest_json.read_text(encoding="utf-8"))
+            self.assertEqual(manifest["source_coverage"]["mode"], "auto")
+            self.assertTrue(manifest["source_coverage"]["history_included"])
+            self.assertEqual(len(manifest["source_coverage"]["diagnostics"]), 1)
+
+    def test_history_included_is_scoped_to_selected_project(self) -> None:
+        # A history-backfill event belonging to a different project than the
+        # one selected must not cause history_included=True for this project
+        # -- that would overstate coverage for evidence never evaluated here.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "events.jsonl"
+            _write_jsonl(
+                source,
+                [
+                    _base_event(
+                        event_id="evt-a",
+                        project_id="proj-a",
+                        provenance=[
+                            {
+                                "source": "claude-code",
+                                "capture_mode": "hook",
+                                "adapter_version": "1.0.0",
+                            }
+                        ],
+                    ),
+                    _base_event(
+                        event_id="evt-b",
+                        project_id="proj-b",
+                        provenance=[
+                            {
+                                "source": "claude-code",
+                                "capture_mode": "history-backfill",
+                                "adapter_version": "1.0.0",
+                            }
+                        ],
+                    ),
+                ],
+            )
+
+            artifacts = run_participant_workflow(
+                [source],
+                assignment_id="course-2026",
+                submitter_id="S001",
+                project_id="proj-a",
+                output_root=root / "runs",
+                strict=False,
+            )
+            manifest = json.loads(artifacts.manifest_json.read_text(encoding="utf-8"))
+            self.assertEqual(manifest["project_id"], "proj-a")
+            self.assertFalse(manifest["source_coverage"]["history_included"])
 
 
 if __name__ == "__main__":

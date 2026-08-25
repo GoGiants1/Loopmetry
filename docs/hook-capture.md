@@ -216,6 +216,46 @@ loopmetry run \
 
 Add `--server` and an enrollment token environment variable to upload the same package. Use repeated `--input` only when explicit files are preferred over discovery.
 
+`--source auto` additionally triggers a consented Claude Code history scan as
+part of the same command, merging it with hook and explicit evidence:
+
+```bash
+loopmetry run --source auto --since 2026-08-01 --until 2026-08-31 \
+  --assignment-id agent-ai-2026 --submitter-id S001
+```
+
+In an interactive terminal this asks the same two confirmation questions as
+`loopmetry history import` (scan, then proceed with N sessions). In a
+non-interactive shell, history is included only when `--include-history` is
+passed; its absence is not an error — the run proceeds with hook and explicit
+evidence only, since `run` is the one-command path and must not abort over an
+omitted optional flag. `--since`/`--until` (`YYYY-MM-DD`) bound the history scan
+for this invocation only; there is no default assignment-window bound yet (that
+part of decision D-012 remains blocked on assignment-schema work — see
+`docs/decision-log.md` D-015).
+
+Cross-source disagreements — the same `event_id` observed with different
+content from, say, a hook and a history-backfill import — never abort a
+`--source auto` run. They surface as an `adapter_conflict` diagnostic (first
+observation kept) printed to stdout as `source diagnostics: adapter_conflict=N`
+and recorded in `manifest.json`'s `source_coverage` block:
+
+```json
+{
+  "source_coverage": {
+    "mode": "auto",
+    "history_included": true,
+    "diagnostics": [
+      {"kind": "adapter_conflict", "summary": "...", "count": 1}
+    ]
+  }
+}
+```
+
+`report.json`/`report.html` do not yet surface source coverage — that is
+roadmap milestone 2 slice 6's job. Without `--source auto`, `run`'s behavior,
+output, and `manifest.json` shape are unchanged from before this feature.
+
 Captured hooks do not yet infer requirements or acceptance criteria from free-form prompts. Consequently, traceability confidence can remain low until explicit requirement import and Git/spec enrichers are implemented.
 
 ## Current coverage

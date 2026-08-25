@@ -26,6 +26,7 @@ Statuses:
 | D-012 | 2026-08-23 | Accepted | Hybrid auto mode bounds historical backfill to the assignment window by default; broader operational proposals deferred |
 | D-013 | 2026-08-24 | Accepted | Historical backfill checkpoints persist unresolved tool_use state; unknown-status events finalize only when a session has stalled |
 | D-014 | 2026-08-25 | Accepted | Hook-config installer merges structurally and gates any existing-file modification behind `--force` with a mandatory backup |
+| D-015 | 2026-08-25 | Accepted | Hybrid auto-merge tolerates cross-source conflicts as diagnostics; assignment-window default remains blocked |
 
 ---
 
@@ -178,6 +179,22 @@ Statuses:
 - An initial implementation of this entry used a single shell-parsed command string and prefix-based ownership matching; external review before merge found both unsafe (a changed `--project-id` created a second, conflicting hook handler instead of replacing the first, and `--remove` could delete unrelated user-authored hooks matching only by command prefix). Both were corrected before merge, so this entry describes the corrected design directly rather than superseding itself.
 
 **Related:** `docs/decision-log.md` D-011, `docs/hook-capture.md`, `docs/roadmap.md` milestone 2 slice 3, `src/loopmetry/hook_integration.py`, `src/loopmetry/cli.py`, `src/loopmetry/adapters/checkpoints.py`
+
+---
+
+## D-015 — Hybrid auto-merge tolerates cross-source conflicts as diagnostics; assignment-window default remains blocked
+
+**Status:** Accepted
+**Context:** Milestone 2 slice 4 (`docs/roadmap.md`) adds `loopmetry run --source auto`, which actively triggers a consented Claude Code history import as part of the one-command flow and merges it with hook/explicit evidence. Two open questions from D-011/D-012 needed resolving before implementation: (1) `merge_events` (`event_merge.py`) raises `EventConflictError` on any same-`event_id` content disagreement, which is correct for same-adapter merges (`history import`, plain `run`, `ingest` — a conflict there more likely means corruption) but wrong for a legitimate cross-source disagreement, where D-011 requires conflicts to stay visible, not crash the run; (2) D-012 said the default backfill window should be the assignment's configured start/end, but `admin_storage.py` has no `Assignment` entity or `starts_at`/`ends_at` field, and D-012 itself only committed to that default "once the administrator schema carries them."
+**Decision:** A new `merge_events_tolerant` and `load_event_files_with_diagnostics` (used only when `run_participant_workflow(..., strict=False)`, which only `run --source auto` passes) turn a cross-source content conflict into an aggregated `adapter_conflict` `Diagnostic` — first observation kept, printed to stdout and recorded in `manifest.json`'s `source_coverage` block — instead of raising. `load_event_files` and `merge_events` themselves are unchanged; every other caller keeps hard-failing on conflict. `run --source auto` accepts explicit `--since`/`--until` bounds for the history scan; no assignment-window default is implemented in this slice, and this entry records that D-012's assignment-window default stays blocked on assignment-schema work, to be picked up in its own decision when that schema exists. Non-interactive `run --source auto` without `--include-history` is a silent skip of the history step, not an error — unlike `history import --yes`, which still hard-fails non-interactively without consent — because `run` is the one-command participant path and must not abort a routine analysis over an omitted optional flag.
+**Consequences:**
+
+- `src/loopmetry/event_merge.py` and `src/loopmetry/workflow.py` gain tolerant variants used only by the new path; no existing caller's behavior changes.
+- `manifest.json` gains an optional `source_coverage` key only when `--source auto` was used; default `run` output is byte-for-byte unchanged.
+- Per-metric confidence in `metrics_*.py`/`evaluation.py` is untouched by this slice — "lower confidence" from a conflict is satisfied by making it visible to a human reader (stdout, manifest), not by mutating a metric score. Roadmap milestone 2 slice 6 ("Participant report source coverage") owns adding real report sections.
+- `cli.py`'s `history import` consent/import body is factored into `_consented_history_import`, shared with `run --source auto`, so the two commands' interactive prompts and merge-into-file semantics cannot silently drift apart.
+
+**Related:** `docs/decision-log.md` D-011, D-012, `docs/roadmap.md` milestone 2 slice 4, `src/loopmetry/event_merge.py`, `src/loopmetry/workflow.py`, `src/loopmetry/cli.py`
 
 ---
 

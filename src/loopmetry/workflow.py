@@ -7,15 +7,16 @@ import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 from uuid import uuid4
 
-from .event_merge import EventConflictError, merge_events
+from .adapters.base import Diagnostic
+from .event_merge import EventConflictError, merge_events, merge_events_tolerant
 from .evaluation import ProjectEvaluator
 from .evaluation_models import ProjectReport
 from .io import InputError, load_jsonl, select_project
 from .report import render
-from .schema import Event
+from .schema import CaptureMode, Event
 from .submission import (
     SubmissionError,
     SubmissionReceipt,
@@ -37,6 +38,7 @@ class RunArtifacts:
     report: ProjectReport
     submission: dict[str, object]
     receipt: SubmissionReceipt | None = None
+    source_diagnostics: tuple[Diagnostic, ...] = ()
 
 
 def _utc_now() -> datetime:
@@ -100,6 +102,51 @@ def load_event_files(paths: Iterable[str | Path]) -> list[Event]:
     return sorted(by_id.values(), key=lambda event: (event.timestamp, event.event_id))
 
 
+def load_event_files_with_diagnostics(
+    paths: Iterable[str | Path],
+) -> tuple[list[Event], tuple[Diagnostic, ...]]:
+    """Like load_event_files, but a content conflict under a shared event_id
+    becomes an aggregated adapter_conflict Diagnostic (first observation kept)
+    instead of raising InputError. Used only by run --source auto (D-011):
+    cross-source disagreements must stay visible, never abort the run.
+    """
+
+    materialized = [Path(path).expanduser() for path in paths]
+    if not materialized:
+        raise InputError(
+            "no normalized event files were found; pass --input or configure Loopmetry hooks"
+        )
+
+    by_id: dict[str, Event] = {}
+    conflicted_ids: list[str] = []
+    for path in materialized:
+        for event in load_jsonl(path):
+            existing = by_id.get(event.event_id)
+            if existing is None:
+                by_id[event.event_id] = event
+                continue
+            merged, conflicted = merge_events_tolerant(existing, event)
+            by_id[event.event_id] = merged
+            if conflicted:
+                conflicted_ids.append(event.event_id)
+
+    diagnostics: tuple[Diagnostic, ...] = ()
+    if conflicted_ids:
+        shown = ", ".join(conflicted_ids[:5])
+        if len(conflicted_ids) > 5:
+            shown += f", +{len(conflicted_ids) - 5} more"
+        diagnostics = (
+            Diagnostic(
+                kind="adapter_conflict",
+                summary=f"conflicting duplicate event_id(s) across sources, first observation kept: {shown}",
+                count=len(conflicted_ids),
+            ),
+        )
+
+    events = sorted(by_id.values(), key=lambda event: (event.timestamp, event.event_id))
+    return events, diagnostics
+
+
 def _write_run_manifest(
     path: Path,
     *,
@@ -109,6 +156,7 @@ def _write_run_manifest(
     submitter_id: str,
     source_files: Sequence[Path],
     receipt: SubmissionReceipt | None,
+    source_coverage: Mapping[str, Any] | None = None,
 ) -> None:
     manifest = {
         "schema_version": "1.0",
@@ -125,6 +173,8 @@ def _write_run_manifest(
         ],
         "receipt": receipt.to_mapping() if receipt else None,
     }
+    if source_coverage is not None:
+        manifest["source_coverage"] = source_coverage
     write_private_text(path, json.dumps(manifest, ensure_ascii=False, indent=2) + "\n")
 
 
@@ -138,11 +188,24 @@ def run_participant_workflow(
     server_url: str | None = None,
     submission_token: str | None = None,
     timeout_seconds: float = 30.0,
+    strict: bool = True,
 ) -> RunArtifacts:
-    """Analyze, render, package, and optionally upload one participant run."""
+    """Analyze, render, package, and optionally upload one participant run.
+
+    strict=False switches to the tolerant cross-source loader (D-011): a
+    content conflict between, e.g., a hook observation and a history-backfill
+    observation of the same event_id becomes an adapter_conflict diagnostic
+    instead of aborting the run. Only run --source auto passes strict=False;
+    every other caller keeps today's hard-fail-on-conflict behavior.
+    """
 
     normalized_sources = [Path(path).expanduser() for path in source_files]
-    events = select_project(load_event_files(normalized_sources), project_id)
+    if strict:
+        loaded_events = load_event_files(normalized_sources)
+        source_diagnostics: tuple[Diagnostic, ...] = ()
+    else:
+        loaded_events, source_diagnostics = load_event_files_with_diagnostics(normalized_sources)
+    events = select_project(loaded_events, project_id)
     report = ProjectEvaluator().evaluate(events)
     created_at = _utc_now()
     run_id = _run_id(created_at)
@@ -169,6 +232,31 @@ def run_participant_workflow(
         render_submission(submission),
     )
 
+    source_coverage: dict[str, Any] | None = None
+    if not strict:
+        # A conflicted history-backfill observation loses the merge (Task 1) and
+        # so leaves no trace in `events`'s provenance; scan the raw inputs
+        # instead so coverage reporting reflects what was observed, not just
+        # what survived conflict resolution. Filter to the project actually
+        # selected and evaluated (report.project_id) -- with a multi-project
+        # input set, a history-backfill event belonging to an unrelated
+        # project must not overstate this project's coverage.
+        history_included = any(
+            record.capture_mode is CaptureMode.HISTORY_BACKFILL
+            for path in normalized_sources
+            for event in load_jsonl(path)
+            if event.project_id == report.project_id
+            for record in event.provenance
+        )
+        source_coverage = {
+            "mode": "auto",
+            "history_included": history_included,
+            "diagnostics": [
+                {"kind": d.kind, "summary": d.summary, "count": d.count}
+                for d in source_diagnostics
+            ],
+        }
+
     receipt: SubmissionReceipt | None = None
     manifest_json = run_directory / "manifest.json"
     _write_run_manifest(
@@ -179,6 +267,7 @@ def run_participant_workflow(
         submitter_id=submitter_id,
         source_files=normalized_sources,
         receipt=None,
+        source_coverage=source_coverage,
     )
 
     if server_url is not None:
@@ -202,6 +291,7 @@ def run_participant_workflow(
             submitter_id=submitter_id,
             source_files=normalized_sources,
             receipt=receipt,
+            source_coverage=source_coverage,
         )
     return RunArtifacts(
         run_id=run_id,
@@ -213,4 +303,5 @@ def run_participant_workflow(
         report=report,
         submission=submission,
         receipt=receipt,
+        source_diagnostics=source_diagnostics,
     )

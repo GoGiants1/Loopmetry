@@ -56,7 +56,7 @@ The `run` command accepts repeated `--input` values or discovers the following d
 .loopmetry/events/*.jsonl
 ```
 
-Discovery is deliberately narrow. It does not scan a user’s home directory or guess unstable vendor transcript formats. Events backfilled by `loopmetry history import --source claude-code` (decision D-011) land under `.loopmetry/events/` and are picked up by this same discovery step exactly like hook-captured events — `loopmetry run` never reads local history itself, only the already-consented, already-written output of a prior `history import`.
+Discovery is deliberately narrow. It does not scan a user’s home directory or guess unstable vendor transcript formats. Events backfilled by `loopmetry history import --source claude-code` (decision D-011) land under `.loopmetry/events/` and are picked up by this same discovery step exactly like hook-captured events. Default `loopmetry run` (no `--source` flag) never reads local history itself, only the already-consented, already-written output of a prior `history import`. `loopmetry run --source auto` is the exception: it actively triggers a consented Claude Code history scan as part of the same command — interactively via the same double-confirmation prompts as `history import`, or non-interactively only when `--include-history` is passed — and merges the result with hook/explicit evidence before evaluation (decision D-015).
 
 The run directory contains:
 

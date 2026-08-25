@@ -31,6 +31,7 @@ Then route by task:
 | Claude Code / Codex capture | `docs/hook-capture.md`, `docs/event-schema.md` | `src/loopmetry/hook_capture.py`, `src/loopmetry/schema.py` | `tests/test_hook_capture.py`, `tests/test_schema.py` |
 | Source adapters and historical backfill | `docs/architecture.md`, `docs/hook-capture.md`, `docs/decision-log.md` D-011, D-013 | `src/loopmetry/adapters/`, `src/loopmetry/adapters/claude_code_history.py`, `src/loopmetry/hook_capture.py`, `src/loopmetry/minimize.py` | `tests/test_adapters.py`, `tests/test_claude_code_history.py`, `tests/test_hook_capture.py` |
 | Hook integration installer | `docs/hook-capture.md`, `docs/decision-log.md` D-014 | `src/loopmetry/hook_integration.py`, `src/loopmetry/cli.py` | `tests/test_hook_integration.py`, `tests/test_cli.py` |
+| Hybrid auto mode | `docs/hook-capture.md`, `docs/decision-log.md` D-015 | `src/loopmetry/cli.py`, `src/loopmetry/workflow.py`, `src/loopmetry/event_merge.py` | `tests/test_cli.py`, `tests/test_workflow.py`, `tests/test_event_merge.py` |
 | Deterministic evaluation | `docs/metrics.md`, `docs/event-schema.md` | `src/loopmetry/evaluation.py`, `src/loopmetry/metrics_*.py` | `tests/test_evaluation.py` |
 | Reports and visualization | `docs/web-ui.md` | `src/loopmetry/report.py` | `tests/test_report.py` |
 | Future LLM boundary | `docs/llm-evaluation.md`, `schemas/llm-evaluation-*.json`, `rubrics/` | `src/loopmetry/llm_bundle.py` | `tests/test_llm_bundle.py` |

@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from . import __version__
-from .adapters.base import AdapterError, DiscoveryContext
+from .adapters.base import AdapterError, AdapterRun, DiscoveryContext, SourceAdapter
 from .adapters.checkpoints import atomic_write_bytes, load_checkpoint, save_checkpoint
 from .adapters.claude_code_history import ClaudeCodeHistoryAdapter
 from .admin_server import (
@@ -96,6 +96,52 @@ def _participant_source_files(args: argparse.Namespace) -> list[Path]:
             "pass --input or configure capture hooks"
         )
     return discovered
+
+
+def _auto_source_files(args: argparse.Namespace, root: Path) -> list[Path]:
+    discovered = discover_event_files(root)
+    # _consented_history_import no longer creates a new empty output file
+    # from a zero-session import, so this shouldn't fire for that case
+    # anymore -- kept as a belt-and-braces guard for a stale empty file left
+    # by some other cause, so --source auto still tolerates it instead of
+    # crashing on "file with zero events" the way explicit --input would.
+    discovered = [path for path in discovered if path.stat().st_size > 0]
+    explicit = [Path(path).expanduser() for path in args.input]
+    combined = {path.resolve() for path in (*discovered, *explicit)}
+    if not combined:
+        raise InputError(
+            f"no Loopmetry event files found below {root}, and no history was imported; "
+            "pass --input, configure capture hooks, or check --include-history"
+        )
+    return sorted(combined)
+
+
+def _maybe_import_history_for_auto(args: argparse.Namespace, root: Path) -> None:
+    interactive = sys.stdin.isatty()
+    if not interactive and not args.include_history:
+        # Non-interactive run --source auto without explicit consent: proceed
+        # with hook/explicit evidence only. Unlike history import, this is not
+        # an error -- run is the one-command path and must not abort a routine
+        # analysis over an omitted optional flag (roadmap milestone 2 slice 4).
+        return
+    since = _parse_since(args.since)
+    until = _parse_until(args.until)
+    if since is not None and until is not None and since > until:
+        raise InputError(
+            f"--since {args.since!r} is after --until {args.until!r}; "
+            "the history scan window can never match anything"
+        )
+    context = DiscoveryContext(
+        project_root=root,
+        since=since,
+        until=until,
+        interactive=interactive,
+    )
+    claude_home_raw = os.environ.get(DEFAULT_CLAUDE_HOME_ENV)
+    claude_home = Path(claude_home_raw).expanduser() if claude_home_raw else None
+    adapter = ClaudeCodeHistoryAdapter(claude_home=claude_home)
+    output_path = root / ".loopmetry" / "events" / "claude-code-history.jsonl"
+    _consented_history_import(adapter, context, root, interactive=interactive, output_path=output_path)
 
 
 def _required_run_identity(args: argparse.Namespace) -> tuple[str, str]:
@@ -266,6 +312,26 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     run.add_argument("--output-root", default=".loopmetry/runs")
     run.add_argument("--timeout", type=float, default=30.0, help="Upload timeout in seconds.")
+    run.add_argument(
+        "--source",
+        choices=("auto",),
+        default=None,
+        help=(
+            "Use 'auto' to merge hook, explicit, and consented Claude Code "
+            "history evidence (default: hook/explicit only, unchanged)."
+        ),
+    )
+    run.add_argument(
+        "--since", default=None, help="YYYY-MM-DD lower bound for --source auto history discovery."
+    )
+    run.add_argument(
+        "--until", default=None, help="YYYY-MM-DD upper bound for --source auto history discovery."
+    )
+    run.add_argument(
+        "--include-history",
+        action="store_true",
+        help="Consent to reading local Claude Code history non-interactively under --source auto.",
+    )
 
     submit = subparsers.add_parser(
         "submit", help="Retry upload of an existing submission.json without re-running analysis."
@@ -415,6 +481,20 @@ def _parse_since(value: str | None) -> datetime | None:
         raise InputError(f"--since must be YYYY-MM-DD, got {value!r}") from exc
 
 
+def _parse_until(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        day = datetime.strptime(value, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    except ValueError as exc:
+        raise InputError(f"--until must be YYYY-MM-DD, got {value!r}") from exc
+    # An upper bound must include the whole specified day, not exclude it:
+    # the adapter's filter drops any event with timestamp > until, so
+    # midnight of the day itself would silently exclude everything on that
+    # day, contradicting "--until 2026-08-31" reading as "through Aug 31".
+    return day.replace(hour=23, minute=59, second=59, microsecond=999999)
+
+
 def _write_events_atomically(path: Path, events: Sequence[Event]) -> None:
     payload = "".join(
         json.dumps(event.to_mapping(), ensure_ascii=False, separators=(",", ":")) + "\n"
@@ -478,6 +558,101 @@ def _run_integrate(args: argparse.Namespace) -> int:
     atomic_write_bytes(path, new_text.encode("utf-8"))
     print(f"{'updated' if existing_text is not None else 'created'} {path}")
     return 0
+
+
+def _consented_history_import(
+    adapter: SourceAdapter,
+    context: DiscoveryContext,
+    root: Path,
+    *,
+    interactive: bool,
+    output_path: Path,
+) -> AdapterRun | None:
+    """Runs the interactive double-confirmation, then discovers, previews,
+    imports, merges into output_path, and saves the checkpoint.
+
+    Callers own the non-interactive consent gate before calling this: history
+    import hard-fails without --yes, while run --source auto silently skips
+    the call entirely. Once called, the interactive prompts below are asked
+    unconditionally when interactive=True, matching history import's existing
+    behavior regardless of any consent flag.
+    """
+    if interactive:
+        scan_answer = input(
+            "Scan local Claude Code history for this project to preview "
+            "importable sessions? [y/N] "
+        ).strip().lower()
+        if scan_answer != "y":
+            print("import cancelled")
+            return None
+
+    candidates = adapter.discover(context)
+    preview = adapter.preview(candidates)
+
+    if interactive:
+        print(
+            f"{preview.session_count} session(s), {preview.total_size_bytes} byte(s) "
+            "of local Claude Code history will be read."
+        )
+        answer = input("Proceed with import? [y/N] ").strip().lower()
+        if answer != "y":
+            print("import cancelled")
+            return None
+
+    try:
+        checkpoint = load_checkpoint(root, adapter.name)
+    except AdapterError as exc:
+        print(f"warning: {exc}; re-importing without a checkpoint", file=sys.stderr)
+        checkpoint = None
+
+    run = adapter.import_candidates(candidates, context, checkpoint=checkpoint)
+
+    # Fail closed: a corrupt or unparsable existing output file must never be
+    # treated as "no prior evidence" and silently overwritten with only this
+    # run's events (that would delete everything previously imported). The
+    # checkpoint from this run has not been saved yet, so raising here leaves
+    # both the output file and the checkpoint untouched -- safe to retry once
+    # the file is fixed or removed by hand.
+    existing_events = load_jsonl(output_path) if output_path.exists() else []
+
+    by_id: dict[str, Event] = {event.event_id: event for event in existing_events}
+    for event in run.events:
+        existing = by_id.get(event.event_id)
+        if existing is None:
+            by_id[event.event_id] = event
+            continue
+        # Overlapping observations merge without losing provenance (invariant
+        # 10); a genuine content conflict under the same event_id is an error,
+        # matching io.load_jsonl and EventStore.add_events elsewhere.
+        try:
+            by_id[event.event_id] = merge_events(existing, event)
+        except EventConflictError as exc:
+            raise InputError(
+                f"{output_path}: conflicting duplicate event_id {event.event_id!r}"
+            ) from exc
+    merged_events = sorted(by_id.values(), key=lambda event: (event.timestamp, event.event_id))
+    # A zero-event import must not fabricate an empty output file: a later,
+    # unrelated `loopmetry run` (no --source auto) discovers .loopmetry/events/
+    # via discover_event_files and treats a 0-byte file as "input file
+    # contains no events", crashing with no indication of the cause. Only
+    # skip the write when there is nothing on disk yet to preserve; if
+    # output_path already exists (a prior real import), re-running against it
+    # must stay idempotent, so it is still (re)written even if now empty.
+    if merged_events or output_path.exists():
+        _write_events_atomically(output_path, merged_events)
+
+    # Checkpoint progress is independent of whether this import emitted an
+    # event. In particular, D-013 stores unresolved Bash tool_use state in the
+    # checkpoint so a later tool_result can complete it after an append.
+    if run.checkpoint is not None:
+        save_checkpoint(root, run.checkpoint)
+
+    new_count = len(by_id) - len(existing_events)
+    diagnostic_summary = ", ".join(f"{d.kind}={d.count}" for d in run.diagnostics) or "none"
+    print(f"imported {new_count} new event(s); {len(merged_events)} total in {output_path}")
+    print(f"diagnostics: {diagnostic_summary}")
+    print(f"coverage: {run.coverage.to_mapping()['categories']}")
+    return run
 
 
 def _run_history(args: argparse.Namespace) -> int:
@@ -561,90 +736,23 @@ def _run_history(args: argparse.Namespace) -> int:
         return 0
 
     if args.history_command == "import":
-        # Consent must be checked before any transcript content is read at all —
+        # Consent must be checked before any transcript content is read at all --
         # discover() itself opens and JSON-parses the first lines of every
         # candidate file to confirm its cwd, so calling it before this check
         # would mean a rejected non-interactive run had already read local
-        # history. Interactive mode asks twice: once to scan at all, and again
-        # (with real counts) before actually importing.
-        if interactive:
-            scan_answer = input(
-                "Scan local Claude Code history for this project to preview "
-                "importable sessions? [y/N] "
-            ).strip().lower()
-            if scan_answer != "y":
-                print("import cancelled")
-                return 0
-        elif not args.yes:
+        # history.
+        if not interactive and not args.yes:
             raise InputError(
                 "loopmetry history import requires --yes when not run interactively "
                 "(this flag is the explicit consent to read local history)"
             )
-
-        candidates = adapter.discover(context)
-        preview = adapter.preview(candidates)
-
-        if interactive:
-            print(
-                f"{preview.session_count} session(s), {preview.total_size_bytes} byte(s) "
-                "of local Claude Code history will be read."
-            )
-            answer = input("Proceed with import? [y/N] ").strip().lower()
-            if answer != "y":
-                print("import cancelled")
-                return 0
-
-        try:
-            checkpoint = load_checkpoint(root, adapter.name)
-        except AdapterError as exc:
-            print(f"warning: {exc}; re-importing without a checkpoint", file=sys.stderr)
-            checkpoint = None
-
-        run = adapter.import_candidates(candidates, context, checkpoint=checkpoint)
 
         output_path = (
             Path(args.output).expanduser()
             if args.output
             else root / ".loopmetry" / "events" / "claude-code-history.jsonl"
         )
-        # Fail closed: a corrupt or unparsable existing output file must never be
-        # treated as "no prior evidence" and silently overwritten with only this
-        # run's events (that would delete everything previously imported). The
-        # checkpoint from this run has not been saved yet, so raising here leaves
-        # both the output file and the checkpoint untouched — safe to retry once
-        # the file is fixed or removed by hand.
-        existing_events = load_jsonl(output_path) if output_path.exists() else []
-
-        by_id: dict[str, Event] = {event.event_id: event for event in existing_events}
-        for event in run.events:
-            existing = by_id.get(event.event_id)
-            if existing is None:
-                by_id[event.event_id] = event
-                continue
-            # Overlapping observations merge without losing provenance (invariant
-            # 10); a genuine content conflict under the same event_id is an error,
-            # matching io.load_jsonl and EventStore.add_events elsewhere.
-            try:
-                by_id[event.event_id] = merge_events(existing, event)
-            except EventConflictError as exc:
-                raise InputError(
-                    f"{output_path}: conflicting duplicate event_id {event.event_id!r}"
-                ) from exc
-        merged_events = sorted(by_id.values(), key=lambda event: (event.timestamp, event.event_id))
-        _write_events_atomically(output_path, merged_events)
-
-        if run.checkpoint is not None:
-            save_checkpoint(root, run.checkpoint)
-
-        new_count = len(by_id) - len(existing_events)
-        diagnostic_summary = (
-            ", ".join(f"{d.kind}={d.count}" for d in run.diagnostics) or "none"
-        )
-        print(
-            f"imported {new_count} new event(s); {len(merged_events)} total in {output_path}"
-        )
-        print(f"diagnostics: {diagnostic_summary}")
-        print(f"coverage: {run.coverage.to_mapping()['categories']}")
+        _consented_history_import(adapter, context, root, interactive=interactive, output_path=output_path)
         return 0
 
     raise AssertionError(f"unhandled history command: {args.history_command}")
@@ -779,7 +887,14 @@ def _run(args: argparse.Namespace) -> int:
 
     if args.command == "run":
         assignment_id, submitter_id = _required_run_identity(args)
-        source_files = _participant_source_files(args)
+        if args.source == "auto":
+            root = Path(args.root).expanduser()
+            _maybe_import_history_for_auto(args, root)
+            source_files = _auto_source_files(args, root)
+            strict = False
+        else:
+            source_files = _participant_source_files(args)
+            strict = True
         token = token_from_environment(args.token_env) if args.server else None
         artifacts = run_participant_workflow(
             source_files,
@@ -790,10 +905,14 @@ def _run(args: argparse.Namespace) -> int:
             server_url=args.server,
             submission_token=token,
             timeout_seconds=args.timeout,
+            strict=strict,
         )
         print(f"analysis complete: project={artifacts.report.project_id} run={artifacts.run_id}")
         print(f"HTML report: {artifacts.report_html}")
         print(f"submission file: {artifacts.submission_json}")
+        if artifacts.source_diagnostics:
+            summary = ", ".join(f"{d.kind}={d.count}" for d in artifacts.source_diagnostics)
+            print(f"source diagnostics: {summary}")
         if artifacts.receipt:
             duplicate = " duplicate" if artifacts.receipt.duplicate else ""
             print(
