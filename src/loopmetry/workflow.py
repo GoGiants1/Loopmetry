@@ -237,11 +237,15 @@ def run_participant_workflow(
         # A conflicted history-backfill observation loses the merge (Task 1) and
         # so leaves no trace in `events`'s provenance; scan the raw inputs
         # instead so coverage reporting reflects what was observed, not just
-        # what survived conflict resolution.
+        # what survived conflict resolution. Filter to the project actually
+        # selected and evaluated (report.project_id) -- with a multi-project
+        # input set, a history-backfill event belonging to an unrelated
+        # project must not overstate this project's coverage.
         history_included = any(
             record.capture_mode is CaptureMode.HISTORY_BACKFILL
             for path in normalized_sources
             for event in load_jsonl(path)
+            if event.project_id == report.project_id
             for record in event.provenance
         )
         source_coverage = {

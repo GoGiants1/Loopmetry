@@ -311,6 +311,53 @@ class StrictFlagTests(unittest.TestCase):
             self.assertTrue(manifest["source_coverage"]["history_included"])
             self.assertEqual(len(manifest["source_coverage"]["diagnostics"]), 1)
 
+    def test_history_included_is_scoped_to_selected_project(self) -> None:
+        # A history-backfill event belonging to a different project than the
+        # one selected must not cause history_included=True for this project
+        # -- that would overstate coverage for evidence never evaluated here.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "events.jsonl"
+            _write_jsonl(
+                source,
+                [
+                    _base_event(
+                        event_id="evt-a",
+                        project_id="proj-a",
+                        provenance=[
+                            {
+                                "source": "claude-code",
+                                "capture_mode": "hook",
+                                "adapter_version": "1.0.0",
+                            }
+                        ],
+                    ),
+                    _base_event(
+                        event_id="evt-b",
+                        project_id="proj-b",
+                        provenance=[
+                            {
+                                "source": "claude-code",
+                                "capture_mode": "history-backfill",
+                                "adapter_version": "1.0.0",
+                            }
+                        ],
+                    ),
+                ],
+            )
+
+            artifacts = run_participant_workflow(
+                [source],
+                assignment_id="course-2026",
+                submitter_id="S001",
+                project_id="proj-a",
+                output_root=root / "runs",
+                strict=False,
+            )
+            manifest = json.loads(artifacts.manifest_json.read_text(encoding="utf-8"))
+            self.assertEqual(manifest["project_id"], "proj-a")
+            self.assertFalse(manifest["source_coverage"]["history_included"])
+
 
 if __name__ == "__main__":
     unittest.main()
