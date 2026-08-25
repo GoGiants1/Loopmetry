@@ -4,7 +4,7 @@
 
 **Goal:** A consented, bounded, incremental `loopmetry history discover|preview|import --source claude-code` flow that converts existing local Claude Code session transcripts into canonical Loopmetry events with `history-backfill` provenance.
 
-**Architecture:** A `ClaudeCodeHistoryAdapter` implements the slice-1 `SourceAdapter` contract. Discovery is bounded to `~/.claude/projects/<encoded-project-root>/` for the current project only; every candidate is confirmed from content (session `cwd`), never from the lossy directory name alone. Parsing streams JSONL records, pairs `tool_use`/`tool_result` blocks, reuses the hook path's minimization helpers (extracted to a shared module first), counts unknown records as diagnostics, and writes canonical events to `.loopmetry/events/claude-code-history.jsonl` where the existing participant workflow already discovers them. Checkpoints make re-import incremental and idempotent.
+**Architecture:** A `ClaudeCodeHistoryAdapter` implements the slice-1 `SourceAdapter` contract. Discovery is bounded to `~/.claude/projects/<encoded-project-root>/` for the current project only; every candidate is confirmed from content (session `cwd`), never from the lossy directory name alone. Parsing streams JSONL records, pairs `tool_use`/`tool_result` blocks, reuses the hook path's minimization helpers (extracted to a shared module first), counts unknown records as diagnostics, and writes canonical events to `.loopmetry/events/claude-code-history.jsonl` where the existing participant workflow already discovers them. Checkpoints make re-import incremental and idempotent, and — per D-013 — also carry unresolved `tool_use`/`tool_result` pairing state across import boundaries so a Bash call's outcome is written under its event ID at most once, only after it is either observed or confirmed stalled.
 
 **Tech Stack:** Python ≥3.12 stdlib only. Depends on slice 1 (`src/loopmetry/adapters/base.py`, `checkpoints.py`, `Event.provenance`, `CaptureMode.HISTORY_BACKFILL`) being merged.
 
@@ -44,7 +44,7 @@
   - `minimize.safe_relative_path(value: object, cwd: str) -> str | None` (from `_safe_path`, line 65)
   - `minimize.command_signature(command: str) -> tuple[str, str | None]` (from `_command_signature`, line 205, plus its regex constants and the `shlex`/`os` fallback)
 
-- [ ] **Step 1: Move the helpers**
+- [x] **Step 1: Move the helpers**
 
 Create `src/loopmetry/minimize.py` with module docstring `"""Shared content-minimization helpers used by every source adapter."""`, the imports they need (`hashlib`, `json`, `os`, `re`, `shlex`, `pathlib` names), the constants `_PATCH_FILE_RE` stays in hook_capture (patch parsing is hook-specific), but move `_SAFE_ID_RE` and the command-signature rule table. Rename per the interface list above (drop leading underscores).
 
@@ -63,12 +63,12 @@ from .minimize import (
 
 (keeping the `derive_project_id` re-export so `from loopmetry.hook_capture import derive_project_id` continues to work for the CLI and tests).
 
-- [ ] **Step 2: Run the full suite to prove behavior is unchanged**
+- [x] **Step 2: Run the full suite to prove behavior is unchanged**
 
 Run: `uv run python -m unittest discover -s tests -v`
 Expected: PASS with the same test count as before the change.
 
-- [ ] **Step 3: Lint and commit**
+- [x] **Step 3: Lint and commit**
 
 ```bash
 uvx --from ruff==0.12.12 ruff check .
@@ -91,7 +91,7 @@ git commit -m "refactor: extract shared minimization helpers for source adapters
   - `encode_claude_project_dir(project_root: Path) -> str` — absolute resolved path with every `/` and `.` replaced by `-` (e.g. `/Users/w/my.app` → `-Users-w-my-app`).
   - `class ClaudeCodeHistoryAdapter` with `name = "claude-code-history"`, `adapter_version = CLAUDE_HISTORY_ADAPTER_VERSION`, constructor `def __init__(self, claude_home: Path | None = None)` (defaults to `Path.home() / ".claude"`; injectable for tests), and the contract methods. `discover` also records `self.last_discovery_diagnostics: tuple[Diagnostic, ...]` (unattributable candidates, skipped subagent dirs).
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `tests/test_claude_code_history.py`:
 
@@ -197,12 +197,12 @@ if __name__ == "__main__":
     unittest.main()
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `uv run python -m unittest tests.test_claude_code_history -v`
 Expected: ERROR `ModuleNotFoundError: No module named 'loopmetry.adapters.claude_code_history'`.
 
-- [ ] **Step 3: Implement discovery**
+- [x] **Step 3: Implement discovery**
 
 Create `src/loopmetry/adapters/claude_code_history.py`:
 
@@ -372,12 +372,12 @@ def _cwd_in_scope(cwd: str, project_root: Path) -> bool:
 
 (`import_candidates` is Task 3 — add a temporary `raise NotImplementedError` body so the class is importable, and remove it in Task 3.)
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `uv run python -m unittest tests.test_claude_code_history -v`
 Expected: PASS.
 
-- [ ] **Step 5: Lint and commit**
+- [x] **Step 5: Lint and commit**
 
 ```bash
 uvx --from ruff==0.12.12 ruff check .
@@ -404,14 +404,16 @@ git commit -m "feat: bounded discovery of Claude Code history sessions"
 | assistant `tool_use` named `Edit`/`Write`/`MultiEdit`/`NotebookEdit` with `file_path`/`notebook_path` | `file_change` `{path, action: "add"` when the tool is `Write` else `"modify"}`, actor `agent` |
 | assistant `tool_use` named `Bash` with `command`, paired with its later `tool_result` (`is_error` flag) | `command` `{command: <signature label>, status: "failed"` if `is_error` else `"success"`, command_sha256, tool_name: "Bash"}`, actor `tool`; plus `verification` / `error` events exactly as the hook path derives them (same signature table, same status mapping) |
 | assistant `tool_use` named `ExitPlanMode`/`TodoWrite`/`EnterPlanMode` | `plan` `{summary: "Agent created or updated a plan; plan text omitted."}`, actor `agent` |
-| unmatched `tool_use` with no `tool_result` by end of session | `command` with `status: "unknown"` (Bash only; other unmatched tools are dropped silently — they produced no evidence) |
+| unmatched Bash `tool_use` with no `tool_result` by end of session | **no event yet.** Stashed in the checkpoint's `pending` map (see D-013) and carried into the next import. Only finalized to `command(status="unknown")` — using the entry's originally-stored `record_index` so the event ID never changes — once an import observes the session has stalled (zero file growth since the position where the entry was left); a `stalled_tool_call` diagnostic is emitted alongside. While merely pending (not yet stalled), an `unresolved_tool_call` diagnostic is emitted instead, and no event is written. Other unmatched, non-Bash tools are dropped silently — they produced no evidence and have no result to pair against. |
 | any other record `type` | counted into one `unparsed_record`-style diagnostic per type: kind `"skipped_record_type"`, summary naming the type |
 | malformed JSON line | diagnostic kind `"unparsed_record"` |
 | line longer than `_MAX_RECORD_BYTES` | diagnostic kind `"truncated_input"`; coverage for `commands`/`file_changes` degrades to `PARTIAL` |
 
-Event IDs: `f"hist-{canonical_hash({'session': session_id, 'file': file_name, 'index': record_index, 'kind': kind, 'suffix': suffix})[:24]}"` — deterministic across re-imports. Coverage: categories from `capabilities()` at `FULL`, downgraded to `PARTIAL` when any `truncated_input`/`unparsed_record` diagnostics occurred; `requirements` and `commits` are absent (not claimable from transcripts alone).
+Event IDs: `f"hist-{canonical_hash({'session': session_id, 'file': file_name, 'index': record_index, 'kind': kind, 'suffix': suffix})[:24]}"` — deterministic across re-imports, using the record's original index even when the event is emitted on a later import (stalled Bash finalization). Coverage: categories from `capabilities()` at `FULL`, downgraded to `PARTIAL` when any `truncated_input`/`unparsed_record`/`unresolved_tool_call`/`stalled_tool_call` diagnostics occurred; `requirements` and `commits` are absent (not claimable from transcripts alone).
 
-- [ ] **Step 1: Write the failing tests**
+**Checkpoint-boundary tool_use/tool_result pairing (D-013):** because Bash `command` events depend on pairing a `tool_use` with a `tool_result` that may arrive in a later append, and re-emitting a corrected event under an already-written `event_id` would raise `EventConflictError` on merge, an event's content is only ever written once — after the outcome is either observed or the session is confirmed stalled. See D-013 in `docs/decision-log.md` for the full rationale; the mechanics are in Tasks 3 and 4 below.
+
+- [x] **Step 1: Write the failing tests**
 
 Append to `tests/test_claude_code_history.py` (uses the existing `_record`/`_write_session` helpers; note assistant/user record shapes):
 
@@ -521,21 +523,37 @@ class ImportTests(unittest.TestCase):
         self.assertEqual(len(run.events), 1)
 
     def test_reimport_is_deterministic(self) -> None:
-        records = [_record("user", message={"role": "user", "content": "hi"})]
-        first = self._import([dict(records[0])])
-        second = self._import([dict(records[0])])
+        # Re-importing the same transcript (no checkpoint passed either time, so
+        # everything is re-read from scratch) must yield byte-identical events.
+        # NOTE: this must reuse one fixed project root across both imports —
+        # `derive_project_id` hashes the resolved root path, so two calls to
+        # `_import` (which each spin up a fresh temp directory) would differ in
+        # `project_id` alone and falsely look non-deterministic.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "work" / "project"
+            root.mkdir(parents=True)
+            claude_home = Path(tmp) / "claude-home"
+            project_dir = claude_home / "projects" / encode_claude_project_dir(root)
+            record = _record(
+                "user", cwd=str(root), message={"role": "user", "content": "hi"}
+            )
+            _write_session(project_dir, "sess.jsonl", [record])
+            adapter = ClaudeCodeHistoryAdapter(claude_home=claude_home)
+            context = DiscoveryContext(project_root=root)
+            first = adapter.import_candidates(adapter.discover(context), context)
+            second = adapter.import_candidates(adapter.discover(context), context)
         self.assertEqual(
             [e.to_mapping() for e in first.events],
             [e.to_mapping() for e in second.events],
         )
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `uv run python -m unittest tests.test_claude_code_history -v`
 Expected: FAIL with `NotImplementedError` from `import_candidates`.
 
-- [ ] **Step 3: Implement parsing**
+- [x] **Step 3: Implement parsing**
 
 Replace the `NotImplementedError` body. Structure (full code, following the event table above):
 
@@ -556,13 +574,26 @@ Replace the `NotImplementedError` body. Structure (full code, following the even
             else {}
         )
         for candidate in candidates:
+            path = Path(candidate.candidate_id)
+            previous_position = positions.get(candidate.candidate_id)
+            start_index = _resume_index(previous_position, path, diagnostic_counts)
+            # A reset (start_index == 0 with a nonempty previous position) means the
+            # transcript rotated; its old pending state refers to record indexes that
+            # no longer mean anything in the new file, so it must not be restored.
+            reset = bool(previous_position) and start_index == 0
+            previous_records_read = 0 if reset else (previous_position or {}).get("records_read", 0)
+            pending_seed = {} if reset else (previous_position or {}).get("pending", {})
             session = _SessionParser(
-                path=Path(candidate.candidate_id),
+                path=path,
                 project_root=project_root,
                 project_id=project_id,
-                start_index=_resume_index(positions.get(candidate.candidate_id), Path(candidate.candidate_id), diagnostic_counts),
+                start_index=start_index,
+                pending_seed=pending_seed,
             )
             events.extend(session.parse())
+            events.extend(
+                session.finalize_stalled(previous_records_read=previous_records_read)
+            )
             for key, count in session.diagnostic_counts.items():
                 diagnostic_counts[key] = diagnostic_counts.get(key, 0) + count
             positions[candidate.candidate_id] = session.position()
@@ -570,7 +601,11 @@ Replace the `NotImplementedError` body. Structure (full code, following the even
             Diagnostic(kind=kind, summary=summary, count=count)
             for (kind, summary), count in sorted(diagnostic_counts.items())
         )
-        degraded = any(d.kind in {"unparsed_record", "truncated_input"} for d in diagnostics)
+        degraded = any(
+            d.kind
+            in {"unparsed_record", "truncated_input", "unresolved_tool_call", "stalled_tool_call"}
+            for d in diagnostics
+        )
         coverage = CoverageReport(
             categories={
                 category: (Coverage.PARTIAL if degraded else Coverage.FULL)
@@ -588,22 +623,24 @@ Replace the `NotImplementedError` body. Structure (full code, following the even
         )
 ```
 
-`_SessionParser` is a small class in the same module holding the pairing state:
+`_SessionParser` is a small class in the same module holding the pairing state. Per D-013, it never emits a Bash `command` event speculatively — only once the outcome is observed, or once the session is confirmed stalled across an import boundary — so an `event_id` is written at most once with content that never changes afterward.
 
+- Constructor: `__init__(self, *, path, project_root, project_id, start_index, pending_seed: Mapping[str, Mapping[str, Any]])`. Copies `pending_seed` into `self.pending: dict[str, dict[str, Any]]` (keyed by `tool_use_id`, each entry `{"record_index": int, "command": str, "timestamp": str}`) instead of starting empty — this is what lets a `tool_result` arriving in a later append still find the `tool_use` it belongs to.
 - `parse()` streams lines with `enumerate`, skipping indexes below `start_index`; per line: length check (`len(line.encode("utf-8", errors="replace")) > _MAX_RECORD_BYTES` → count `("truncated_input", "oversized transcript record skipped")` and continue), `json.loads` failure → count `("unparsed_record", "malformed JSON line")`, non-`user`/`assistant` `type` → count `("skipped_record_type", f"records of type {record_type!r} are not imported")`.
-- User records: content string or all-`text`-block list and no `isMeta` → emit `human_intervention` with `hash_text(prompt)`/`len(prompt)`. Content list with `tool_result` blocks → for each block, pop `self.pending.get(tool_use_id)`; if it is a Bash entry, emit the command/verification/error events with status `"failed"` if `is_error` else `"success"`.
-- Assistant records: iterate `message.content` `tool_use` blocks. `Read`-like → emit `file_read` immediately (path via `safe_relative_path(value, str(self.project_root))`; unextractable path → count `("unextractable_path", ...)`). Edit-like → emit `file_change` (`action="add"` for `Write`, else `"modify"`). Plan tools → emit `plan`. `Bash` → stash `(command, record_index, timestamp)` in `self.pending[tool_use_id]`.
-- End of stream: for each still-pending Bash entry, emit `command` with `status="unknown"` (no verification/error).
+- User records: content string or all-`text`-block list and no `isMeta` → emit `human_intervention` with `hash_text(prompt)`/`len(prompt)`. Content list with `tool_result` blocks → for each block, pop `self.pending.get(tool_use_id)` (present either because this parser just stashed it, or because it was restored from `pending_seed`); if found and it is a Bash entry, emit the command/verification/error events with status `"failed"` if `is_error` else `"success"`, using the entry's stored `record_index` (not the current line index) for the event ID. If not found (already finalized as stalled in an earlier import, or never a Bash call), the `tool_result` is dropped — it has nothing left to pair with.
+- Assistant records: iterate `message.content` `tool_use` blocks. `Read`-like → emit `file_read` immediately (path via `safe_relative_path(value, str(self.project_root))`; unextractable path → count `("unextractable_path", ...)`). Edit-like → emit `file_change` (`action="add"` for `Write`, else `"modify"`). Plan tools → emit `plan`. `Bash` → stash `{"record_index": index, "command": command, "timestamp": timestamp}` in `self.pending[tool_use_id]`; emit nothing yet.
+- End of stream: `self.pending` is deliberately left as-is — `parse()` does **not** flush it. Finalization is a separate, explicit step (`finalize_stalled`) so it can compare against the checkpoint's growth history rather than assuming "end of this import" means "end of the session."
+- `finalize_stalled(self, *, previous_records_read: int) -> list[Event]`: for each entry still in `self.pending` whose `record_index < previous_records_read` (i.e., it was already pending *before* this import started, not newly added by this import) — meaning at least one full import cycle passed with the file never growing past that point — emit its `command(status="unknown")` event (plus no verification/error; unknown status has nothing to verify), count `("stalled_tool_call", "a Bash call's result never arrived; session appears stalled")`, and remove it from `self.pending`. Any entry that fails this check (added fresh in this import, i.e. `record_index >= previous_records_read`) stays in `self.pending` untouched, and instead counts `("unresolved_tool_call", "a Bash call is awaiting its result")`.
 - Command/verification/error derivation mirrors `hook_capture` exactly: `label, kind = command_signature(command)`; command data `{"command": label, "status": status, "command_sha256": hash_text(command), "tool_name": "Bash"}`; verification only when `kind` is not None with status map `{"success": "passed", "failed": "failed", "unknown": "skipped"}`; error event `{"code": "TOOL_EXIT_NONZERO", "message": f"{label} failed; output omitted."}` only when status is `"failed"`.
 - Every event is built through one `_event(...)` helper that fills the envelope: deterministic `event_id` (formula in the Interfaces block), `source=_EVENT_SOURCE`, `provenance` with `source_ref={"session_file": self.path.name, "record_index": index}`, timestamp from the record (fall back to the previous record's timestamp; if the first record has none, count `("unparsed_record", "record missing timestamp")` and skip), constructed via `Event.from_mapping` so schema validation applies.
-- `position()` returns `{"content_sha256": <sha256 of the first line>, "records_read": <total line count seen>}`; `_resume_index(saved, path, counts)` returns `saved["records_read"]` when the stored `content_sha256` still matches the file's current first line, else counts `("checkpoint_reset", "transcript rotated or replaced; re-importing from the start")` and returns 0.
+- `position()` returns `{"content_sha256": <sha256 of the first line>, "records_read": <total line count seen>, "pending": <self.pending, JSON-serializable as-is>}`; `_resume_index(saved, path, counts)` returns `saved.get("records_read", 0)` when the stored `content_sha256` still matches the file's current first line, else counts `("checkpoint_reset", "transcript rotated or replaced; re-importing from the start")` and returns 0 (a reset also drops `pending_seed` for that candidate — a rotated file's line indexes no longer mean anything, so any old pending state is stale and must not be restored).
 
-- [ ] **Step 4: Run tests to verify they pass, then the full suite**
+- [x] **Step 4: Run tests to verify they pass, then the full suite**
 
 Run: `uv run python -m unittest tests.test_claude_code_history -v && uv run python -m unittest discover -s tests`
 Expected: PASS.
 
-- [ ] **Step 5: Lint and commit**
+- [x] **Step 5: Lint and commit**
 
 ```bash
 uvx --from ruff==0.12.12 ruff check .
@@ -618,7 +655,7 @@ git commit -m "feat: parse Claude Code transcripts into canonical backfill event
 **Files:**
 - Test: `tests/test_claude_code_history.py` (extend; implementation already landed in Task 3 — this task proves incrementality and rotation explicitly and fixes anything it flushes out)
 
-- [ ] **Step 1: Write the tests**
+- [x] **Step 1: Write the tests**
 
 ```python
 class IncrementalImportTests(unittest.TestCase):
@@ -653,6 +690,71 @@ class IncrementalImportTests(unittest.TestCase):
                 run_one.events[0].event_id, run_two.events[0].event_id
             )
 
+    def test_pending_bash_call_resolved_by_later_append_yields_one_correct_event(self) -> None:
+        """D-013: a tool_use at the checkpoint boundary must not lose its real result."""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "work" / "project"
+            root.mkdir(parents=True)
+            claude_home = Path(tmp) / "claude-home"
+            project_dir = claude_home / "projects" / encode_claude_project_dir(root)
+            tool_use = _assistant_tool_use(
+                "Bash", {"command": "uv run pytest"}, "t1", ""
+            )
+            tool_use["cwd"] = str(root)
+            path = _write_session(project_dir, "sess.jsonl", [tool_use])
+            adapter = ClaudeCodeHistoryAdapter(claude_home=claude_home)
+            context = DiscoveryContext(project_root=root)
+
+            run_one = adapter.import_candidates(adapter.discover(context), context)
+            self.assertEqual([e.type.value for e in run_one.events], [])
+            self.assertIn("unresolved_tool_call", {d.kind for d in run_one.diagnostics})
+
+            result = _user_tool_result("t1", "", is_error=False)
+            result["cwd"] = str(root)
+            result["timestamp"] = "2026-08-20T09:00:01Z"
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(result) + "\n")
+            run_two = adapter.import_candidates(
+                adapter.discover(context), context, checkpoint=run_one.checkpoint
+            )
+            by_type = {e.type.value: e for e in run_two.events}
+            self.assertEqual(by_type["command"].data["status"], "success")
+            self.assertNotIn("stalled_tool_call", {d.kind for d in run_two.diagnostics})
+
+    def test_stalled_bash_call_finalizes_to_unknown_only_after_no_growth(self) -> None:
+        """D-013: only finalize to unknown once an import cycle shows the file stopped growing."""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "work" / "project"
+            root.mkdir(parents=True)
+            claude_home = Path(tmp) / "claude-home"
+            project_dir = claude_home / "projects" / encode_claude_project_dir(root)
+            tool_use = _assistant_tool_use(
+                "Bash", {"command": "uv run pytest"}, "t1", ""
+            )
+            tool_use["cwd"] = str(root)
+            _write_session(project_dir, "sess.jsonl", [tool_use])
+            adapter = ClaudeCodeHistoryAdapter(claude_home=claude_home)
+            context = DiscoveryContext(project_root=root)
+
+            run_one = adapter.import_candidates(adapter.discover(context), context)
+            self.assertEqual([e.type.value for e in run_one.events], [])
+
+            # Nothing appended: the file has not grown since run_one left this entry pending.
+            run_two = adapter.import_candidates(
+                adapter.discover(context), context, checkpoint=run_one.checkpoint
+            )
+            by_type = {e.type.value: e for e in run_two.events}
+            self.assertEqual(by_type["command"].data["status"], "unknown")
+            self.assertIn("stalled_tool_call", {d.kind for d in run_two.diagnostics})
+
+            # A third import must not re-emit or conflict with the now-finalized event.
+            run_three = adapter.import_candidates(
+                adapter.discover(context), context, checkpoint=run_two.checkpoint
+            )
+            self.assertEqual(run_three.events, ())
+
     def test_rotated_transcript_resets_checkpoint_with_diagnostic(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "work" / "project"
@@ -681,10 +783,10 @@ class IncrementalImportTests(unittest.TestCase):
             self.assertIn("checkpoint_reset", {d.kind for d in run_two.diagnostics})
 ```
 
-- [ ] **Step 2: Run, fix anything these reveal, and commit**
+- [x] **Step 2: Run, fix anything these reveal, and commit**
 
 Run: `uv run python -m unittest tests.test_claude_code_history -v`
-Expected: PASS (Task 3 already implements this; if either test fails, fix `_resume_index`/`position()` until green — do not weaken the tests).
+Expected: PASS (Task 3 already implements this; if any test fails, fix `_resume_index`/`position()`/`finalize_stalled` until green — do not weaken the tests). The four new tests together prove D-013's guarantee end-to-end: a pending Bash call survives a checkpoint boundary and resolves correctly when its result arrives late, finalizes to `unknown` only after a full no-growth import cycle, and is never re-emitted or re-conflicted once finalized.
 
 ```bash
 git add tests/test_claude_code_history.py src/loopmetry/adapters/claude_code_history.py
@@ -707,13 +809,12 @@ git commit -m "test: prove incremental and rotation-safe history import"
   - `loopmetry history import --source claude-code [--root DIR] [--since YYYY-MM-DD] [--output PATH] [--yes]` — interactive TTY: print the preview, then require `y` on stdin; non-TTY/non-interactive: require `--yes`, else exit 2 with a message naming the flag (running `import --yes` IS the explicit consent — never triggered implicitly). Writes the union of existing and new events (deduplicated by `event_id`, sorted by `(timestamp, event_id)`) to `--output` (default `<root>/.loopmetry/events/claude-code-history.jsonl`), saves the checkpoint via `save_checkpoint`, prints an import summary: events written, per-kind diagnostic counts, coverage. A corrupt checkpoint (`AdapterError` from `load_checkpoint`) is reported and treated as no checkpoint.
   - Only `--source claude-code` is accepted (choices list); Codex arrives in slice 5.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
-Append to `tests/test_cli.py` (match its existing invocation style — it calls `loopmetry.cli.main([...])` and captures stdout; reuse the synthetic-transcript helpers by importing from `tests.test_claude_code_history` or duplicating the two small builders locally):
+`tests/test_cli.py`'s actual convention is subprocess-based (`self.run_cli(*args, env=...)` spawns `python -m loopmetry`), not a direct `main([...])` call with `mock.patch.dict`/`contextlib.redirect_stdout` — follow the file's real style, not the assumed one below. Append to `CliTests`:
 
 ```python
-class HistoryCliTests(unittest.TestCase):
-    def _make_history(self, tmp: Path) -> Path:
+    def _make_history_project(self, tmp: Path) -> tuple[Path, Path]:
         root = tmp / "work" / "project"
         root.mkdir(parents=True)
         claude_home = tmp / "claude-home"
@@ -726,82 +827,73 @@ class HistoryCliTests(unittest.TestCase):
             "cwd": str(root),
             "message": {"role": "user", "content": "hello"},
         }
-        (project_dir / "sess.jsonl").write_text(
-            json.dumps(record) + "\n", encoding="utf-8"
-        )
-        self.claude_home = claude_home
-        return root
+        (project_dir / "sess.jsonl").write_text(json.dumps(record) + "\n", encoding="utf-8")
+        return root, claude_home
 
-    def test_discover_lists_sessions(self) -> None:
+    def test_history_discover_lists_sessions(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            root = self._make_history(Path(tmp))
-            with mock.patch.dict(
-                os.environ, {"LOOPMETRY_CLAUDE_HOME": str(self.claude_home)}
-            ):
-                stdout = io.StringIO()
-                with contextlib.redirect_stdout(stdout):
-                    exit_code = main(
-                        ["history", "discover", "--source", "claude-code", "--root", str(root)]
-                    )
-        self.assertEqual(exit_code, 0)
-        self.assertIn("sess.jsonl", stdout.getvalue())
+            root, claude_home = self._make_history_project(Path(tmp))
+            result = self.run_cli(
+                "history", "discover", "--source", "claude-code", "--root", str(root),
+                env={**os.environ, "LOOPMETRY_CLAUDE_HOME": str(claude_home)},
+            )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("sess.jsonl", result.stdout)
 
-    def test_import_requires_consent_when_not_interactive(self) -> None:
+    def test_history_import_requires_consent_when_not_interactive(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            root = self._make_history(Path(tmp))
-            with mock.patch.dict(
-                os.environ, {"LOOPMETRY_CLAUDE_HOME": str(self.claude_home)}
-            ):
-                exit_code = main(
-                    ["history", "import", "--source", "claude-code", "--root", str(root)]
-                )
-        self.assertEqual(exit_code, 2)
+            root, claude_home = self._make_history_project(Path(tmp))
+            result = self.run_cli(
+                "history", "import", "--source", "claude-code", "--root", str(root),
+                env={**os.environ, "LOOPMETRY_CLAUDE_HOME": str(claude_home)},
+            )
+        self.assertEqual(result.returncode, 2)
         self.assertFalse((root / ".loopmetry" / "events").exists())
 
-    def test_import_with_yes_writes_events_and_checkpoint(self) -> None:
+    def test_history_import_with_yes_writes_events_and_checkpoint(self) -> None:
+        # NOTE: assertions that touch `root` must stay inside the `with` block —
+        # the temp directory (and everything under it) is gone once it exits.
         with tempfile.TemporaryDirectory() as tmp:
-            root = self._make_history(Path(tmp))
-            with mock.patch.dict(
-                os.environ, {"LOOPMETRY_CLAUDE_HOME": str(self.claude_home)}
-            ):
-                exit_code = main(
-                    [
-                        "history", "import", "--source", "claude-code",
-                        "--root", str(root), "--yes",
-                    ]
-                )
-        self.assertEqual(exit_code, 0)
-        output = root / ".loopmetry" / "events" / "claude-code-history.jsonl"
-        events = load_jsonl(output)
-        self.assertEqual(len(events), 1)
-        self.assertEqual(events[0].provenance[0].capture_mode.value, "history-backfill")
-        checkpoint = root / ".loopmetry" / "checkpoints" / "claude-code-history.json"
-        self.assertTrue(checkpoint.exists())
+            root, claude_home = self._make_history_project(Path(tmp))
+            result = self.run_cli(
+                "history", "import", "--source", "claude-code",
+                "--root", str(root), "--yes",
+                env={**os.environ, "LOOPMETRY_CLAUDE_HOME": str(claude_home)},
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            output = root / ".loopmetry" / "events" / "claude-code-history.jsonl"
+            events = load_jsonl(output)
+            self.assertEqual(len(events), 1)
+            self.assertEqual(events[0].provenance[0].capture_mode.value, "history-backfill")
+            checkpoint = root / ".loopmetry" / "checkpoints" / "claude-code-history.json"
+            self.assertTrue(checkpoint.exists())
 
-    def test_import_twice_is_idempotent(self) -> None:
+    def test_history_import_twice_is_idempotent(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            root = self._make_history(Path(tmp))
-            with mock.patch.dict(
-                os.environ, {"LOOPMETRY_CLAUDE_HOME": str(self.claude_home)}
-            ):
-                args = [
-                    "history", "import", "--source", "claude-code",
-                    "--root", str(root), "--yes",
-                ]
-                main(args)
-                main(args)
-        output = root / ".loopmetry" / "events" / "claude-code-history.jsonl"
-        self.assertEqual(len(load_jsonl(output)), 1)
+            root, claude_home = self._make_history_project(Path(tmp))
+            args = (
+                "history", "import", "--source", "claude-code",
+                "--root", str(root), "--yes",
+            )
+            env = {**os.environ, "LOOPMETRY_CLAUDE_HOME": str(claude_home)}
+            first = self.run_cli(*args, env=env)
+            second = self.run_cli(*args, env=env)
+            self.assertEqual(first.returncode, 0, first.stderr)
+            self.assertEqual(second.returncode, 0, second.stderr)
+            output = root / ".loopmetry" / "events" / "claude-code-history.jsonl"
+            self.assertEqual(len(load_jsonl(output)), 1)
 ```
 
-(`LOOPMETRY_CLAUDE_HOME` is a test-focused env override for the Claude home directory — add it to the CLI handler as `Path(os.environ.get("LOOPMETRY_CLAUDE_HOME", Path.home() / ".claude"))`; it also gives administrators a documented escape hatch for non-standard installs.)
+Add `import os` and `from loopmetry.adapters.claude_code_history import encode_claude_project_dir` / `from loopmetry.io import load_jsonl` to the test file's imports.
 
-- [ ] **Step 2: Run tests to verify they fail**
+`self.run_cli`'s `env` parameter, when given, fully replaces the subprocess environment (not merges), so pass `{**os.environ, "LOOPMETRY_CLAUDE_HOME": ...}` rather than just the one override — otherwise the child process loses `PATH` and fails to start. `LOOPMETRY_CLAUDE_HOME` is a test-focused env override for the Claude home directory — add it to the CLI handler as `Path(os.environ.get("LOOPMETRY_CLAUDE_HOME", Path.home() / ".claude"))`; it also gives administrators a documented escape hatch for non-standard installs.
+
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `uv run python -m unittest tests.test_cli -v`
 Expected: FAIL (`SystemExit`/argparse error: `invalid choice: 'history'`).
 
-- [ ] **Step 3: Implement the CLI**
+- [x] **Step 3: Implement the CLI**
 
 In `_build_parser` add:
 
@@ -833,12 +925,12 @@ In `_build_parser` add:
 
 Add a `_run_history(args)` handler implementing the Interfaces contract: build `DiscoveryContext(project_root=Path(args.root), since=_parse_since(args.since), interactive=sys.stdin.isatty())`, instantiate `ClaudeCodeHistoryAdapter(claude_home=...)` with the env override, then dispatch on `args.history_command`. `_parse_since` parses `YYYY-MM-DD` into a UTC-midnight datetime and raises a CLI error otherwise. Import path: consent gate first (TTY prompt printing `preview.session_count` and `preview.total_size_bytes` then reading `input()`; non-TTY requires `--yes`), `load_checkpoint` (catching `AdapterError` → print warning, use `None`), `import_candidates`, merge-with-existing via `load_jsonl` on the output file when it exists (catch `InputError` for a missing/empty file), dedupe by `event_id` preferring existing, sort, write atomically with the same pattern as `save_checkpoint`, then `save_checkpoint(root, run.checkpoint)` and print the summary. Wire `_run_history` into `main`'s command dispatch next to the existing commands.
 
-- [ ] **Step 4: Run the full suite and lint**
+- [x] **Step 4: Run the full suite and lint**
 
 Run: `uv run python -m unittest discover -s tests -v && uvx --from ruff==0.12.12 ruff check .`
 Expected: PASS / clean.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/loopmetry/cli.py tests/test_cli.py
@@ -855,7 +947,7 @@ git commit -m "feat: add consented loopmetry history discover/preview/import"
 - Modify: `docs/submission-workflow.md` (participant flow: note that backfilled events in `.loopmetry/events/` are picked up by `loopmetry run` discovery exactly like hook events)
 - Modify: `AGENTS.md` routing row (add `src/loopmetry/adapters/claude_code_history.py`, `tests/test_claude_code_history.py`)
 
-- [ ] **Step 1: Update the four documents**
+- [x] **Step 1: Update the four documents**
 
 In `docs/hook-capture.md` "Relationship to historical backfill": change "A consented historical-backfill adapter (planned) can recover…" to present tense and document the three commands with one example:
 
@@ -866,7 +958,7 @@ loopmetry history import --source claude-code --since 2026-08-01
 
 noting: bounded to this project's sessions, mtime-window `--since`, interactive confirmation or explicit `--yes`, output under `.loopmetry/events/`, incremental via `.loopmetry/checkpoints/`. In `docs/roadmap.md`, prefix slice 2 with "*(implemented)*". In `AGENTS.md`, extend the adapter routing row. In `docs/submission-workflow.md`, add one sentence where input discovery is described.
 
-- [ ] **Step 2: End-to-end verification**
+- [x] **Step 2: End-to-end verification**
 
 ```bash
 uv run python -m unittest discover -s tests -v
@@ -883,7 +975,7 @@ uv run loopmetry history preview --source claude-code --root .
 
 Expected: a candidate list with no import performed. Do not commit any generated `.loopmetry/` output.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add docs/hook-capture.md docs/roadmap.md docs/submission-workflow.md AGENTS.md
