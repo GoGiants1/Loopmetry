@@ -26,6 +26,7 @@ Statuses:
 | D-012 | 2026-08-23 | Accepted | Hybrid auto mode bounds historical backfill to the assignment window by default; broader operational proposals deferred |
 | D-013 | 2026-08-24 | Accepted | Historical backfill checkpoints persist unresolved tool_use state; unknown-status events finalize only when a session has stalled |
 | D-014 | 2026-08-25 | Accepted | Hook-config installer merges structurally and gates any existing-file modification behind `--force` with a mandatory backup |
+| D-015 | 2026-08-25 | Accepted | Hybrid auto-merge tolerates cross-source conflicts as diagnostics; assignment-window default remains blocked |
 
 ---
 

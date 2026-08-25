@@ -95,7 +95,7 @@ It makes no model call and does not generate a universal developer or participan
 
 `loopmetry run` orchestrates discovery or explicit input, duplicate resolution, project selection, deterministic evaluation, local report generation, submission packaging, optional upload, and receipt persistence.
 
-A planned `--source auto` mode extends this flow: hook events and explicit files are used unconditionally, historical session candidates are previewed and imported only with consent (`--include-history` in non-interactive runs), and the merged evidence flows through the same deterministic pipeline. `--source hook` and `--source history` select a single path explicitly.
+`--source auto` extends this flow: hook events and explicit files are used unconditionally, historical session candidates are previewed and imported only with consent (`--include-history` in non-interactive runs), and the merged evidence flows through the same deterministic pipeline (decision D-015). Default `run` (no `--source` flag) already covers hook and explicit evidence; `--source` currently accepts only `auto` as an additional opt-in on top of that default.
 
 Each run receives its own private directory. A failed upload never deletes the generated report or submission package.
 
