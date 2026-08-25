@@ -10,7 +10,8 @@ from pathlib import Path
 from typing import Iterable, Sequence
 from uuid import uuid4
 
-from .event_merge import EventConflictError, merge_events
+from .adapters.base import Diagnostic
+from .event_merge import EventConflictError, merge_events, merge_events_tolerant
 from .evaluation import ProjectEvaluator
 from .evaluation_models import ProjectReport
 from .io import InputError, load_jsonl, select_project
@@ -98,6 +99,51 @@ def load_event_files(paths: Iterable[str | Path]) -> list[Event]:
                     f"{event.event_id!r} in {origin[event.event_id]} and {path}"
                 ) from exc
     return sorted(by_id.values(), key=lambda event: (event.timestamp, event.event_id))
+
+
+def load_event_files_with_diagnostics(
+    paths: Iterable[str | Path],
+) -> tuple[list[Event], tuple[Diagnostic, ...]]:
+    """Like load_event_files, but a content conflict under a shared event_id
+    becomes an aggregated adapter_conflict Diagnostic (first observation kept)
+    instead of raising InputError. Used only by run --source auto (D-011):
+    cross-source disagreements must stay visible, never abort the run.
+    """
+
+    materialized = [Path(path).expanduser() for path in paths]
+    if not materialized:
+        raise InputError(
+            "no normalized event files were found; pass --input or configure Loopmetry hooks"
+        )
+
+    by_id: dict[str, Event] = {}
+    conflicted_ids: list[str] = []
+    for path in materialized:
+        for event in load_jsonl(path):
+            existing = by_id.get(event.event_id)
+            if existing is None:
+                by_id[event.event_id] = event
+                continue
+            merged, conflicted = merge_events_tolerant(existing, event)
+            by_id[event.event_id] = merged
+            if conflicted:
+                conflicted_ids.append(event.event_id)
+
+    diagnostics: tuple[Diagnostic, ...] = ()
+    if conflicted_ids:
+        shown = ", ".join(conflicted_ids[:5])
+        if len(conflicted_ids) > 5:
+            shown += f", +{len(conflicted_ids) - 5} more"
+        diagnostics = (
+            Diagnostic(
+                kind="adapter_conflict",
+                summary=f"conflicting duplicate event_id(s) across sources, first observation kept: {shown}",
+                count=len(conflicted_ids),
+            ),
+        )
+
+    events = sorted(by_id.values(), key=lambda event: (event.timestamp, event.event_id))
+    return events, diagnostics
 
 
 def _write_run_manifest(

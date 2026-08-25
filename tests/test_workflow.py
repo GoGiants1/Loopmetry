@@ -6,11 +6,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from loopmetry.adapters.base import Diagnostic
 from loopmetry.io import InputError
 from loopmetry.submission import load_submission
 from loopmetry.workflow import (
     discover_event_files,
     load_event_files,
+    load_event_files_with_diagnostics,
     run_participant_workflow,
 )
 
@@ -182,6 +184,67 @@ class ParticipantWorkflowTests(unittest.TestCase):
 
             with self.assertRaises(InputError):
                 load_event_files([first, second])
+
+
+class LoadEventFilesWithDiagnosticsTests(unittest.TestCase):
+    def test_no_conflicts_matches_load_event_files(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            first = root / "a.jsonl"
+            second = root / "b.jsonl"
+            _write_jsonl(first, [_base_event(event_id="evt-1")])
+            _write_jsonl(second, [_base_event(event_id="evt-2")])
+
+            events, diagnostics = load_event_files_with_diagnostics([first, second])
+            self.assertEqual(len(events), 2)
+            self.assertEqual(diagnostics, ())
+
+    def test_one_conflict_keeps_first_and_reports_one_diagnostic(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            first = root / "a.jsonl"
+            second = root / "b.jsonl"
+            _write_jsonl(first, [_base_event(data={"summary": "from-hook"})])
+            _write_jsonl(second, [_base_event(data={"summary": "from-history"})])
+
+            events, diagnostics = load_event_files_with_diagnostics([first, second])
+            self.assertEqual(len(events), 1)
+            self.assertEqual(events[0].data, {"summary": "from-hook"})
+            self.assertEqual(len(diagnostics), 1)
+            diagnostic = diagnostics[0]
+            self.assertIsInstance(diagnostic, Diagnostic)
+            self.assertEqual(diagnostic.kind, "adapter_conflict")
+            self.assertEqual(diagnostic.count, 1)
+            self.assertIn("evt-1", diagnostic.summary)
+
+    def test_multiple_conflicts_aggregate_into_one_diagnostic(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            first = root / "a.jsonl"
+            second = root / "b.jsonl"
+            _write_jsonl(
+                first,
+                [
+                    _base_event(event_id="evt-1", data={"summary": "a1"}),
+                    _base_event(event_id="evt-2", data={"summary": "a2"}),
+                ],
+            )
+            _write_jsonl(
+                second,
+                [
+                    _base_event(event_id="evt-1", data={"summary": "b1"}),
+                    _base_event(event_id="evt-2", data={"summary": "b2"}),
+                ],
+            )
+
+            events, diagnostics = load_event_files_with_diagnostics([first, second])
+            self.assertEqual(len(events), 2)
+            self.assertEqual(len(diagnostics), 1)
+            self.assertEqual(diagnostics[0].count, 2)
+
+    def test_empty_paths_still_raises(self) -> None:
+        with self.assertRaises(InputError):
+            load_event_files_with_diagnostics([])
 
 
 if __name__ == "__main__":
