@@ -37,6 +37,7 @@ from .hook_capture import (
 from .hook_integration import format_settings, merge_settings, remove_settings
 from .io import InputError, load_jsonl, select_project
 from .llm_bundle import BundleError, build_evaluation_bundle, render_evaluation_bundle
+from .llm_provider import DEFAULT_API_KEY_ENV, DEFAULT_MODEL, ProviderError, evaluate
 from .report import render
 from .schema import Event
 from .storage import EventStore
@@ -289,6 +290,26 @@ def _build_parser() -> argparse.ArgumentParser:
     bundle.add_argument("--max-events", type=int, default=1_000)
     bundle.add_argument("--max-bytes", type=int, default=1_000_000)
     bundle.add_argument("--output", help="Output path; use '-' or omit for stdout.")
+
+    judge = subparsers.add_parser(
+        "judge",
+        help="EXPERIMENTAL: send a bundle to a real Anthropic API-key-based LLM judge.",
+    )
+    judge.add_argument("input", help="Path to a bundle JSON file produced by `loopmetry bundle`.")
+    judge.add_argument(
+        "--rubric",
+        default="rubrics/project-work-v1.md",
+        help="Path to the rubric text file.",
+    )
+    judge.add_argument("--api-key-env", default=DEFAULT_API_KEY_ENV)
+    judge.add_argument("--model", default=DEFAULT_MODEL)
+    judge.add_argument("--max-tokens", type=int, default=8000)
+    judge.add_argument("--output", help="Output path; use '-' or omit for stdout.")
+    judge.add_argument(
+        "--yes",
+        action="store_true",
+        help="Skip the confirmation prompt before calling the Anthropic API.",
+    )
 
     capture = subparsers.add_parser(
         "capture-hook",
@@ -835,6 +856,49 @@ def _run(args: argparse.Namespace) -> int:
         _write_output(render_evaluation_bundle(bundle), args.output)
         return 0
 
+    if args.command == "judge":
+        bundle = json.loads(Path(args.input).read_text(encoding="utf-8"))
+        rubric_text = Path(args.rubric).read_text(encoding="utf-8")
+        rubric_id = Path(args.rubric).stem
+        bundle_id = bundle.get("bundle_id", "unknown")
+        event_count = bundle.get("source_coverage", {}).get("event_count", "unknown")
+        print(
+            f"about to send bundle {bundle_id} "
+            f"(project={bundle.get('project_id', 'unknown')}, events={event_count}) "
+            f"to model {args.model} using ${args.api_key_env}",
+            file=sys.stderr,
+        )
+        if not args.yes:
+            try:
+                reply = input("Continue? [y/N] ").strip().lower()
+            except (EOFError, OSError):
+                print("aborted: not interactive; pass --yes to confirm", file=sys.stderr)
+                return 1
+            if reply not in ("y", "yes"):
+                print("aborted: pass --yes to skip this prompt", file=sys.stderr)
+                return 1
+        outcome = evaluate(
+            bundle,
+            rubric_text,
+            model=args.model,
+            api_key_env=args.api_key_env,
+            max_tokens=args.max_tokens,
+            rubric_id=rubric_id,
+        )
+        output = {
+            "judge_run": {
+                "provider": "anthropic",
+                "model": outcome["model"],
+                "bundle_id": bundle_id,
+                "rubric_id": rubric_id,
+                "requested_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                "usage": outcome["usage"],
+            },
+            "result": outcome["result"],
+        }
+        _write_output(json.dumps(output, ensure_ascii=False, indent=2), args.output)
+        return 0
+
     if args.command == "capture-hook":
         payload = _read_json_object_from_stdin()
         events = normalize_hook_payload(
@@ -905,6 +969,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         HookCaptureError,
         InputError,
         OSError,
+        ProviderError,
         SubmissionError,
         ValueError,
     ) as exc:
