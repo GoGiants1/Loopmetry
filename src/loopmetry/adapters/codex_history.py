@@ -315,31 +315,40 @@ class _SessionParser:
     def _pending_entry(self, index: int, command: list[str], timestamp: str) -> dict[str, Any]:
         joined = " ".join(str(part) for part in command)
         label, verification_kind = command_signature(joined)
+        is_apply_patch = bool(command) and command[0] == "apply_patch"
+        patch_files: list[dict[str, str]] = []
+        if is_apply_patch and len(command) > 1 and isinstance(command[1], str):
+            for action, raw_path in _patch_target_paths(command[1]):
+                path = safe_relative_path(raw_path, str(self.project_root))
+                if path is None:
+                    self._count(
+                        "unextractable_path",
+                        "an apply_patch call's target path could not be extracted",
+                    )
+                    continue
+                patch_files.append({"action": action, "path": path})
         return {
             "record_index": index,
             "command_label": label,
             "command_sha256": hash_text(joined),
             "verification_kind": verification_kind,
             "timestamp": timestamp,
-            "is_apply_patch": bool(command) and command[0] == "apply_patch",
-            "patch_text": command[1] if len(command) > 1 and command[0] == "apply_patch" else None,
+            "is_apply_patch": is_apply_patch,
+            "patch_files": patch_files,
         }
 
     def _resolve(self, call_id: str, entry: Mapping[str, Any]) -> list[Event]:
         record_index = int(entry["record_index"])
         timestamp = str(entry["timestamp"])
         if entry.get("is_apply_patch"):
-            patch_text = entry.get("patch_text")
-            headers = _patch_target_paths(patch_text) if isinstance(patch_text, str) else []
-            if not headers:
+            patch_files = entry.get("patch_files") or []
+            if not patch_files:
                 self._count("unextractable_path", "an apply_patch call's target path could not be extracted")
                 return []
             events: list[Event] = []
-            for file_index, (action, raw_path) in enumerate(headers):
-                path = safe_relative_path(raw_path, str(self.project_root))
-                if path is None:
-                    self._count("unextractable_path", "an apply_patch call's target path could not be extracted")
-                    continue
+            for file_index, file_entry in enumerate(patch_files):
+                action = file_entry["action"]
+                path = file_entry["path"]
                 events.append(
                     self._event(
                         record_index,

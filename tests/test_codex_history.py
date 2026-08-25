@@ -213,6 +213,30 @@ class ImportTests(unittest.TestCase):
         self.assertNotEqual(changes[0].data["path"], "/etc/passwd")
         self.assertTrue(changes[0].data["path"].startswith("<external-path-redacted>/"))
 
+    def test_pending_apply_patch_checkpoint_never_contains_raw_patch_text(self) -> None:
+        # Regression guard: an apply_patch call that is still in flight (no
+        # matching completion record yet) must never have its raw patch body
+        # written into the on-disk checkpoint JSON produced by position().
+        # Only the pre-extracted, pre-sanitized (action, path) pairs may be
+        # stashed in the pending map.
+        patch = (
+            "*** Begin Patch\n"
+            "*** Update File: src/app.py\n"
+            "@@\n-old\n+ return 123\n"
+            "*** End Patch"
+        )
+        run, _ = self._import(
+            [_local_shell_call("call-6", ["apply_patch", patch], status="in_progress")]
+        )
+        self.assertIsNotNone(run.checkpoint)
+        positions = run.checkpoint.positions
+        pending = next(iter(positions.values()))["pending"]
+        self.assertIn("call-6", pending)
+        checkpoint_json = json.dumps(positions)
+        self.assertNotIn("+ return 123", checkpoint_json)
+        self.assertNotIn("-old", checkpoint_json)
+        self.assertNotIn("Begin Patch", checkpoint_json)
+
     def test_function_call_and_output_pair_across_two_records(self) -> None:
         run, _ = self._import(
             [
