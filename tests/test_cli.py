@@ -16,6 +16,7 @@ from unittest import mock
 from loopmetry.adapters.claude_code_history import ClaudeCodeHistoryAdapter, encode_claude_project_dir
 from loopmetry.cli import main
 from loopmetry.io import load_jsonl
+from loopmetry.minimize import derive_project_id
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -546,6 +547,279 @@ class HistoryConsentTests(unittest.TestCase):
                         )
                 self.assertEqual(ctx.exception.code, 2)
             mock_discover.assert_not_called()
+
+
+class RunAutoSourceTests(unittest.TestCase):
+    def run_cli(
+        self,
+        *args: str,
+        stdin: str | None = None,
+        env: dict[str, str] | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [sys.executable, "-m", "loopmetry", *args],
+            cwd=ROOT,
+            text=True,
+            input=stdin,
+            capture_output=True,
+            check=False,
+            env=env,
+        )
+
+    def _make_history_project(self, tmp: Path) -> tuple[Path, Path]:
+        root = tmp / "work" / "project"
+        root.mkdir(parents=True)
+        claude_home = tmp / "claude-home"
+        project_dir = claude_home / "projects" / encode_claude_project_dir(root)
+        project_dir.mkdir(parents=True)
+        record = {
+            "type": "user",
+            "sessionId": "sess-1",
+            "timestamp": "2026-08-20T09:00:00Z",
+            "cwd": str(root),
+            "message": {"role": "user", "content": "hello"},
+        }
+        (project_dir / "sess.jsonl").write_text(json.dumps(record) + "\n", encoding="utf-8")
+        return root, claude_home
+
+    def test_default_run_is_unaffected_by_new_flags_being_absent(self) -> None:
+        source = str(ROOT / "examples" / "demo_project.jsonl")
+        with tempfile.TemporaryDirectory() as tmp:
+            output_root = Path(tmp) / "runs"
+            result = self.run_cli(
+                "run", "--input", source,
+                "--assignment-id", "course-2026", "--submitter-id", "S001",
+                "--output-root", str(output_root),
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            run_dir = next(output_root.iterdir())
+            manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
+            self.assertNotIn("source_coverage", manifest)
+            self.assertNotIn("source diagnostics", result.stdout)
+
+    def test_auto_non_interactive_without_include_history_skips_history(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root, claude_home = self._make_history_project(Path(tmp))
+            hooks = root / ".loopmetry" / "hooks"
+            hooks.mkdir(parents=True)
+            project_id = derive_project_id(str(root))
+            (hooks / "claude-code.jsonl").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "0.2",
+                        "event_id": "evt-hook-1",
+                        "project_id": project_id,
+                        "session_id": "sess-1",
+                        "timestamp": "2026-08-20T09:00:00Z",
+                        "type": "project_start",
+                        "actor": "human",
+                        "source": "claude-code",
+                        "data": {"summary": "Start project"},
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            output_root = root / "runs"
+            result = self.run_cli(
+                "run", "--source", "auto", "--root", str(root),
+                "--assignment-id", "course-2026", "--submitter-id", "S001",
+                "--output-root", str(output_root),
+                env={**os.environ, "LOOPMETRY_CLAUDE_HOME": str(claude_home)},
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse((root / ".loopmetry" / "events" / "claude-code-history.jsonl").exists())
+
+    def test_auto_non_interactive_with_include_history_imports_and_merges(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root, claude_home = self._make_history_project(Path(tmp))
+            hooks = root / ".loopmetry" / "hooks"
+            hooks.mkdir(parents=True)
+            project_id = derive_project_id(str(root))
+            (hooks / "claude-code.jsonl").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "0.2",
+                        "event_id": "evt-hook-1",
+                        "project_id": project_id,
+                        "session_id": "sess-1",
+                        "timestamp": "2026-08-20T09:00:00Z",
+                        "type": "project_start",
+                        "actor": "human",
+                        "source": "claude-code",
+                        "data": {"summary": "Start project"},
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            output_root = root / "runs"
+            result = self.run_cli(
+                "run", "--source", "auto", "--root", str(root), "--include-history",
+                "--assignment-id", "course-2026", "--submitter-id", "S001",
+                "--output-root", str(output_root),
+                env={**os.environ, "LOOPMETRY_CLAUDE_HOME": str(claude_home)},
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            history_output = root / ".loopmetry" / "events" / "claude-code-history.jsonl"
+            self.assertTrue(history_output.exists())
+            run_dir = next(output_root.iterdir())
+            manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(manifest["source_coverage"]["mode"], "auto")
+            self.assertTrue(manifest["source_coverage"]["history_included"])
+
+    def test_auto_conflict_between_hook_and_history_is_reported_not_fatal(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root, claude_home = self._make_history_project(Path(tmp))
+            hooks = root / ".loopmetry" / "hooks"
+            hooks.mkdir(parents=True)
+            conflicting_id = "manual-conflict-1"
+            (hooks / "claude-code.jsonl").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "0.2",
+                        "event_id": conflicting_id,
+                        "project_id": "demo-expense-cli",
+                        "session_id": "sess-1",
+                        "timestamp": "2026-08-20T09:00:00Z",
+                        "type": "note",
+                        "actor": "system",
+                        "source": "claude-code",
+                        "data": {"summary": "from-hook"},
+                        "provenance": [
+                            {
+                                "source": "claude-code",
+                                "capture_mode": "hook",
+                                "adapter_version": "1.0.0",
+                            }
+                        ],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            events_dir = root / ".loopmetry" / "events"
+            events_dir.mkdir(parents=True)
+            (events_dir / "preexisting-history.jsonl").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "0.2",
+                        "event_id": conflicting_id,
+                        "project_id": "demo-expense-cli",
+                        "session_id": "sess-1",
+                        "timestamp": "2026-08-20T09:00:00Z",
+                        "type": "note",
+                        "actor": "system",
+                        "source": "claude-code",
+                        "data": {"summary": "from-history"},
+                        "provenance": [
+                            {
+                                "source": "claude-code",
+                                "capture_mode": "history-backfill",
+                                "adapter_version": "1.0.0",
+                            }
+                        ],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            output_root = root / "runs"
+            result = self.run_cli(
+                "run", "--source", "auto", "--root", str(root),
+                "--assignment-id", "course-2026", "--submitter-id", "S001",
+                "--output-root", str(output_root),
+                env={**os.environ, "LOOPMETRY_CLAUDE_HOME": str(claude_home)},
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("source diagnostics: adapter_conflict=1", result.stdout)
+            run_dir = next(output_root.iterdir())
+            manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(manifest["source_coverage"]["diagnostics"][0]["kind"], "adapter_conflict")
+
+    def test_auto_interactive_prompts_are_reused_from_history_import(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root, claude_home = self._make_history_project(Path(tmp))
+            hooks = root / ".loopmetry" / "hooks"
+            hooks.mkdir(parents=True)
+            project_id = derive_project_id(str(root))
+            (hooks / "claude-code.jsonl").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "0.2",
+                        "event_id": "evt-hook-1",
+                        "project_id": project_id,
+                        "session_id": "sess-1",
+                        "timestamp": "2026-08-20T09:00:00Z",
+                        "type": "project_start",
+                        "actor": "human",
+                        "source": "claude-code",
+                        "data": {"summary": "Start project"},
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            output_root = root / "runs"
+            with (
+                mock.patch("builtins.input", side_effect=["y", "y"]) as mock_input,
+                mock.patch("sys.stdin.isatty", return_value=True),
+                mock.patch.dict(os.environ, {"LOOPMETRY_CLAUDE_HOME": str(claude_home)}),
+            ):
+                exit_code = main(
+                    [
+                        "run", "--source", "auto", "--root", str(root),
+                        "--assignment-id", "course-2026", "--submitter-id", "S001",
+                        "--output-root", str(output_root),
+                    ]
+                )
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(mock_input.call_count, 2)
+            self.assertTrue((root / ".loopmetry" / "events" / "claude-code-history.jsonl").exists())
+
+    def test_since_and_until_are_passed_to_history_discovery(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root, claude_home = self._make_history_project(Path(tmp))
+            hooks = root / ".loopmetry" / "hooks"
+            hooks.mkdir(parents=True)
+            project_id = derive_project_id(str(root))
+            (hooks / "claude-code.jsonl").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "0.2",
+                        "event_id": "evt-hook-1",
+                        "project_id": project_id,
+                        "session_id": "sess-1",
+                        "timestamp": "2026-08-20T09:00:00Z",
+                        "type": "project_start",
+                        "actor": "human",
+                        "source": "claude-code",
+                        "data": {"summary": "Start project"},
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            output_root = root / "runs"
+            with (
+                mock.patch.object(
+                    ClaudeCodeHistoryAdapter, "discover", autospec=True, return_value=()
+                ) as mock_discover,
+                mock.patch.dict(os.environ, {"LOOPMETRY_CLAUDE_HOME": str(claude_home)}),
+            ):
+                exit_code = main(
+                    [
+                        "run", "--source", "auto", "--root", str(root), "--include-history",
+                        "--since", "2026-08-01", "--until", "2026-08-31",
+                        "--assignment-id", "course-2026", "--submitter-id", "S001",
+                        "--output-root", str(output_root),
+                    ]
+                )
+            self.assertEqual(exit_code, 0)
+            mock_discover.assert_called_once()
+            context = mock_discover.call_args.args[1]
+            self.assertEqual(context.since.strftime("%Y-%m-%d"), "2026-08-01")
+            self.assertEqual(context.until.strftime("%Y-%m-%d"), "2026-08-31")
 
 
 if __name__ == "__main__":
