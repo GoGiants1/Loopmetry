@@ -215,6 +215,21 @@ class ImportTests(unittest.TestCase):
         self.assertIn("skipped_record_type", kinds)
         self.assertEqual(len(run.events), 1)
 
+    def test_bash_call_with_missing_id_or_command_becomes_diagnostic_not_silent_drop(
+        self,
+    ) -> None:
+        run = self._import(
+            [
+                _assistant_tool_use("Bash", {"command": "pytest"}, None, ""),
+                _assistant_tool_use("Bash", {"command": ""}, "t2", ""),
+            ]
+        )
+        kinds = {d.kind for d in run.diagnostics}
+        self.assertIn("unextractable_command", kinds)
+        counts = {d.kind: d.count for d in run.diagnostics}
+        self.assertEqual(counts["unextractable_command"], 2)
+        self.assertEqual(len(run.events), 0)
+
     def test_reimport_is_deterministic(self) -> None:
         # Re-importing the same transcript (no checkpoint passed either time, so
         # everything is re-read from scratch) must yield byte-identical events.

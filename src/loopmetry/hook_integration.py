@@ -6,6 +6,7 @@ file, diffing, backup, and the force-to-modify-an-existing-file policy.
 
 from __future__ import annotations
 
+import copy
 import json
 from typing import Any, Mapping
 
@@ -46,7 +47,7 @@ def _is_managed_block(block: Any, command: str | None = None) -> bool:
 def merge_settings(
     existing: Mapping[str, Any], project_id: str | None
 ) -> tuple[dict[str, Any], bool]:
-    merged: dict[str, Any] = json.loads(json.dumps(existing))
+    merged: dict[str, Any] = copy.deepcopy(dict(existing))
     command = build_hook_command(project_id)
     changed = False
     hooks = merged.setdefault("hooks", {})
@@ -62,7 +63,7 @@ def merge_settings(
 
 
 def remove_settings(existing: Mapping[str, Any]) -> tuple[dict[str, Any], bool]:
-    merged: dict[str, Any] = json.loads(json.dumps(existing))
+    merged: dict[str, Any] = copy.deepcopy(dict(existing))
     changed = False
     hooks = merged.get("hooks")
     if not isinstance(hooks, dict):

@@ -716,6 +716,11 @@ class _SessionParser:
                     "verification_kind": verification_kind,
                     "timestamp": timestamp,
                 }
+            else:
+                self._count(
+                    "unextractable_command",
+                    "a Bash call's id or command could not be safely extracted",
+                )
             return []
 
         return []
