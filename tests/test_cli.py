@@ -548,5 +548,78 @@ class HistoryConsentTests(unittest.TestCase):
             mock_discover.assert_not_called()
 
 
+class JudgeCommandTests(unittest.TestCase):
+    def test_judge_writes_output_without_prompting_when_yes_is_passed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            bundle_path = tmp_path / "bundle.json"
+            bundle_path.write_text(
+                json.dumps(
+                    {
+                        "bundle_id": "sha256:" + "a" * 64,
+                        "project_id": "demo",
+                        "source_coverage": {"event_count": 1},
+                        "events": [{"event_id": "evt-1"}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            rubric_path = tmp_path / "project-work-v1.md"
+            rubric_path.write_text("rubric text", encoding="utf-8")
+            output_path = tmp_path / "result.json"
+
+            fake_result = {
+                "schema_version": "0.1",
+                "rubric_id": "project-work-v1",
+                "scope": "project",
+                "verdict": "pass",
+                "summary": "ok",
+                "dimensions": [
+                    {
+                        "key": "goal_fidelity",
+                        "label": "Goal fidelity",
+                        "assessability": "assessable",
+                        "rating": 4,
+                        "confidence": 1.0,
+                        "rationale": "matches",
+                        "evidence_ids": ["evt-1"],
+                        "counterevidence_ids": [],
+                        "missing_evidence": [],
+                    }
+                ],
+                "risks": [],
+                "missing_evidence": [],
+                "needs_human_review": False,
+            }
+
+            with mock.patch(
+                "loopmetry.cli.evaluate",
+                return_value={
+                    "result": fake_result,
+                    "usage": {"input_tokens": 5, "output_tokens": 6},
+                    "model": "claude-opus-5",
+                },
+            ) as mocked_evaluate:
+                exit_code = main(
+                    [
+                        "judge",
+                        str(bundle_path),
+                        "--rubric",
+                        str(rubric_path),
+                        "--output",
+                        str(output_path),
+                        "--yes",
+                    ]
+                )
+
+            self.assertEqual(exit_code, 0)
+            mocked_evaluate.assert_called_once()
+            written = json.loads(output_path.read_text(encoding="utf-8"))
+            self.assertEqual(written["judge_run"]["bundle_id"], "sha256:" + "a" * 64)
+            self.assertEqual(written["judge_run"]["rubric_id"], "project-work-v1")
+            self.assertEqual(written["judge_run"]["usage"], {"input_tokens": 5, "output_tokens": 6})
+            self.assertEqual(written["result"]["verdict"], "pass")
+
+
 if __name__ == "__main__":
     unittest.main()
