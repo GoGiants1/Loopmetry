@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import difflib
 import io
 import json
 import os
@@ -33,6 +34,7 @@ from .hook_capture import (
     default_capture_path,
     normalize_hook_payload,
 )
+from .hook_integration import format_settings, merge_settings, remove_settings
 from .io import InputError, load_jsonl, select_project
 from .llm_bundle import BundleError, build_evaluation_bundle, render_evaluation_bundle
 from .report import render
@@ -384,6 +386,23 @@ def _build_parser() -> argparse.ArgumentParser:
         else:
             verb_parser.add_argument("--json", action="store_true")
 
+    integrate = subparsers.add_parser(
+        "integrate",
+        help="Preview, apply, or remove local hook configuration for a capture source.",
+    )
+    integrate.add_argument("source", choices=("claude-code",))
+    integrate.add_argument("--root", default=".")
+    integrate.add_argument(
+        "--project-id", default=None, help="Embed a fixed --project-id in the generated hook command."
+    )
+    integrate.add_argument(
+        "--force", action="store_true", help="Allow apply/remove to modify an existing settings file."
+    )
+    integrate_mode = integrate.add_mutually_exclusive_group(required=True)
+    integrate_mode.add_argument("--preview", action="store_true")
+    integrate_mode.add_argument("--apply", action="store_true")
+    integrate_mode.add_argument("--remove", action="store_true")
+
     return parser
 
 
@@ -402,6 +421,63 @@ def _write_events_atomically(path: Path, events: Sequence[Event]) -> None:
         for event in events
     ).encode("utf-8")
     atomic_write_bytes(path, payload)
+
+
+def _run_integrate(args: argparse.Namespace) -> int:
+    root = Path(args.root).expanduser()
+    path = root / ".claude" / "settings.local.json"
+    existing_text = path.read_text(encoding="utf-8") if path.is_file() else None
+    if existing_text is None:
+        existing: dict[str, Any] = {}
+    else:
+        try:
+            existing = json.loads(existing_text)
+        except json.JSONDecodeError as exc:
+            raise InputError(
+                f"{path}: existing file is not valid JSON; fix or remove it manually"
+            ) from exc
+        if not isinstance(existing, dict):
+            raise InputError(f"{path}: existing file's top-level JSON value is not an object")
+
+    if args.remove:
+        merged, changed = remove_settings(existing)
+    else:
+        merged, changed = merge_settings(existing, args.project_id)
+
+    old_text = existing_text or ""
+    new_text = format_settings(merged) if changed else old_text
+
+    if args.preview:
+        if not changed:
+            print("no changes needed")
+        else:
+            diff = difflib.unified_diff(
+                old_text.splitlines(keepends=True),
+                new_text.splitlines(keepends=True),
+                fromfile=str(path) if existing_text is not None else "/dev/null",
+                tofile=str(path),
+            )
+            sys.stdout.writelines(diff)
+        return 0
+
+    if not changed:
+        print("no changes needed")
+        return 0
+
+    if existing_text is not None and not args.force:
+        raise InputError(
+            f"{path} already exists; pass --force to modify it "
+            "(run with --preview first to review the diff)"
+        )
+
+    if existing_text is not None:
+        backup_path = path.with_name(path.name + ".bak")
+        atomic_write_bytes(backup_path, existing_text.encode("utf-8"))
+        print(f"backed up existing file to {backup_path}")
+
+    atomic_write_bytes(path, new_text.encode("utf-8"))
+    print(f"{'updated' if existing_text is not None else 'created'} {path}")
+    return 0
 
 
 def _run_history(args: argparse.Namespace) -> int:
@@ -810,6 +886,9 @@ def _run(args: argparse.Namespace) -> int:
 
     if args.command == "history":
         return _run_history(args)
+
+    if args.command == "integrate":
+        return _run_integrate(args)
 
     raise AssertionError(f"unhandled command: {args.command}")
 

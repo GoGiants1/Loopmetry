@@ -8,7 +8,7 @@ import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 
-from loopmetry.adapters.base import DiscoveryContext
+from loopmetry.adapters.base import Coverage, DiscoveryContext
 from loopmetry.adapters.claude_code_history import (
     ClaudeCodeHistoryAdapter,
     encode_claude_project_dir,
@@ -214,6 +214,22 @@ class ImportTests(unittest.TestCase):
         kinds = {d.kind for d in run.diagnostics}
         self.assertIn("skipped_record_type", kinds)
         self.assertEqual(len(run.events), 1)
+
+    def test_bash_call_with_missing_id_or_command_becomes_diagnostic_not_silent_drop(
+        self,
+    ) -> None:
+        run = self._import(
+            [
+                _assistant_tool_use("Bash", {"command": "pytest"}, None, ""),
+                _assistant_tool_use("Bash", {"command": ""}, "t2", ""),
+            ]
+        )
+        kinds = {d.kind for d in run.diagnostics}
+        self.assertIn("unextractable_command", kinds)
+        counts = {d.kind: d.count for d in run.diagnostics}
+        self.assertEqual(counts["unextractable_command"], 2)
+        self.assertEqual(len(run.events), 0)
+        self.assertEqual(run.coverage.categories["commands"], Coverage.PARTIAL)
 
     def test_reimport_is_deterministic(self) -> None:
         # Re-importing the same transcript (no checkpoint passed either time, so

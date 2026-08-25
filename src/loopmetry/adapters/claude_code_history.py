@@ -266,7 +266,13 @@ class ClaudeCodeHistoryAdapter:
         )
         degraded = any(
             d.kind
-            in {"unparsed_record", "truncated_input", "unresolved_tool_call", "stalled_tool_call"}
+            in {
+                "unparsed_record",
+                "truncated_input",
+                "unresolved_tool_call",
+                "stalled_tool_call",
+                "unextractable_command",
+            }
             for d in diagnostics
         )
         coverage = CoverageReport(
@@ -716,6 +722,11 @@ class _SessionParser:
                     "verification_kind": verification_kind,
                     "timestamp": timestamp,
                 }
+            else:
+                self._count(
+                    "unextractable_command",
+                    "a Bash call's id or command could not be safely extracted",
+                )
             return []
 
         return []
