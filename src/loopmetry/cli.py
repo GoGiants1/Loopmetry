@@ -100,11 +100,11 @@ def _participant_source_files(args: argparse.Namespace) -> list[Path]:
 
 def _auto_source_files(args: argparse.Namespace, root: Path) -> list[Path]:
     discovered = discover_event_files(root)
-    # A consented history import that finds zero sessions still writes its
-    # output file (so the checkpoint and prior-content invariants hold across
-    # repeated imports); an empty discovered file must not make an otherwise
-    # normal run fail, so it is excluded here rather than passed to the loader
-    # that treats "file with zero events" as an error for explicit --input.
+    # _consented_history_import no longer creates a new empty output file
+    # from a zero-session import, so this shouldn't fire for that case
+    # anymore -- kept as a belt-and-braces guard for a stale empty file left
+    # by some other cause, so --source auto still tolerates it instead of
+    # crashing on "file with zero events" the way explicit --input would.
     discovered = [path for path in discovered if path.stat().st_size > 0]
     explicit = [Path(path).expanduser() for path in args.input]
     combined = {path.resolve() for path in (*discovered, *explicit)}
@@ -124,10 +124,17 @@ def _maybe_import_history_for_auto(args: argparse.Namespace, root: Path) -> None
         # an error -- run is the one-command path and must not abort a routine
         # analysis over an omitted optional flag (roadmap milestone 2 slice 4).
         return
+    since = _parse_since(args.since)
+    until = _parse_until(args.until)
+    if since is not None and until is not None and since > until:
+        raise InputError(
+            f"--since {args.since!r} is after --until {args.until!r}; "
+            "the history scan window can never match anything"
+        )
     context = DiscoveryContext(
         project_root=root,
-        since=_parse_since(args.since),
-        until=_parse_until(args.until),
+        since=since,
+        until=until,
         interactive=interactive,
     )
     claude_home_raw = os.environ.get(DEFAULT_CLAUDE_HOME_ENV)
@@ -478,9 +485,14 @@ def _parse_until(value: str | None) -> datetime | None:
     if not value:
         return None
     try:
-        return datetime.strptime(value, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        day = datetime.strptime(value, "%Y-%m-%d").replace(tzinfo=timezone.utc)
     except ValueError as exc:
         raise InputError(f"--until must be YYYY-MM-DD, got {value!r}") from exc
+    # An upper bound must include the whole specified day, not exclude it:
+    # the adapter's filter drops any event with timestamp > until, so
+    # midnight of the day itself would silently exclude everything on that
+    # day, contradicting "--until 2026-08-31" reading as "through Aug 31".
+    return day.replace(hour=23, minute=59, second=59, microsecond=999999)
 
 
 def _write_events_atomically(path: Path, events: Sequence[Event]) -> None:
@@ -619,10 +631,18 @@ def _consented_history_import(
                 f"{output_path}: conflicting duplicate event_id {event.event_id!r}"
             ) from exc
     merged_events = sorted(by_id.values(), key=lambda event: (event.timestamp, event.event_id))
-    _write_events_atomically(output_path, merged_events)
+    # A zero-event import must not fabricate an empty output file: a later,
+    # unrelated `loopmetry run` (no --source auto) discovers .loopmetry/events/
+    # via discover_event_files and treats a 0-byte file as "input file
+    # contains no events", crashing with no indication of the cause. Only
+    # skip the write when there is nothing on disk yet to preserve; if
+    # output_path already exists (a prior real import), re-running against it
+    # must stay idempotent, so it is still (re)written even if now empty.
+    if merged_events or output_path.exists():
+        _write_events_atomically(output_path, merged_events)
 
-    if run.checkpoint is not None:
-        save_checkpoint(root, run.checkpoint)
+        if run.checkpoint is not None:
+            save_checkpoint(root, run.checkpoint)
 
     new_count = len(by_id) - len(existing_events)
     diagnostic_summary = ", ".join(f"{d.kind}={d.count}" for d in run.diagnostics) or "none"

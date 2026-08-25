@@ -5,6 +5,7 @@ import csv
 import io
 import json
 import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -673,6 +674,12 @@ class RunAutoSourceTests(unittest.TestCase):
             root, claude_home = self._make_history_project(Path(tmp))
             hooks = root / ".loopmetry" / "hooks"
             hooks.mkdir(parents=True)
+            # A conflicting duplicate: same event_id as whatever the history
+            # adapter derives for this session's first note event, but this
+            # slice doesn't need to predict that ID -- instead, prove the
+            # tolerant path activates end-to-end by pre-seeding the history
+            # output file with a record that conflicts with a hook event that
+            # shares its event_id.
             conflicting_id = "manual-conflict-1"
             (hooks / "claude-code.jsonl").write_text(
                 json.dumps(
@@ -820,6 +827,74 @@ class RunAutoSourceTests(unittest.TestCase):
             context = mock_discover.call_args.args[1]
             self.assertEqual(context.since.strftime("%Y-%m-%d"), "2026-08-01")
             self.assertEqual(context.until.strftime("%Y-%m-%d"), "2026-08-31")
+
+    def test_until_date_event_is_included_and_since_after_until_is_rejected(self) -> None:
+        # --until 2026-08-20 must include events timestamped on 2026-08-20
+        # itself (an "upper bound" reading of "through that day"), not
+        # silently exclude the whole day by parsing to its midnight.
+        with tempfile.TemporaryDirectory() as tmp:
+            root, claude_home = self._make_history_project(Path(tmp))
+            output_root = root / "runs"
+            result = self.run_cli(
+                "run", "--source", "auto", "--root", str(root), "--include-history",
+                "--since", "2026-08-20", "--until", "2026-08-20",
+                "--assignment-id", "course-2026", "--submitter-id", "S001",
+                "--output-root", str(output_root),
+                env={**os.environ, "LOOPMETRY_CLAUDE_HOME": str(claude_home)},
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            history_output = root / ".loopmetry" / "events" / "claude-code-history.jsonl"
+            self.assertTrue(history_output.exists())
+            events = load_jsonl(history_output)
+            self.assertEqual(len(events), 1)
+
+            reversed_result = self.run_cli(
+                "run", "--source", "auto", "--root", str(root), "--include-history",
+                "--since", "2026-08-21", "--until", "2026-08-20",
+                "--assignment-id", "course-2026", "--submitter-id", "S001",
+                "--output-root", str(root / "runs-reversed"),
+                env={**os.environ, "LOOPMETRY_CLAUDE_HOME": str(claude_home)},
+            )
+            self.assertEqual(reversed_result.returncode, 2)
+            self.assertIn("--since", reversed_result.stderr)
+
+    def test_auto_include_history_with_no_matching_history_then_plain_run_still_succeeds(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "work" / "project"
+            root.mkdir(parents=True)
+            # An empty claude_home (no project directory at all) means
+            # discover() finds zero candidates for this project -- the
+            # "no matching local Claude Code history" case.
+            claude_home = Path(tmp) / "claude-home"
+            claude_home.mkdir(parents=True)
+            hooks = root / ".loopmetry" / "hooks"
+            hooks.mkdir(parents=True)
+            shutil.copyfile(ROOT / "examples" / "demo_project.jsonl", hooks / "claude-code.jsonl")
+
+            output_root = root / "runs"
+            env = {**os.environ, "LOOPMETRY_CLAUDE_HOME": str(claude_home)}
+            auto_result = self.run_cli(
+                "run", "--source", "auto", "--root", str(root), "--include-history",
+                "--assignment-id", "course-2026", "--submitter-id", "S001",
+                "--output-root", str(output_root),
+                env=env,
+            )
+            self.assertEqual(auto_result.returncode, 0, auto_result.stderr)
+            history_output = root / ".loopmetry" / "events" / "claude-code-history.jsonl"
+            self.assertFalse(
+                history_output.exists(),
+                "a zero-event history import must not create an empty output file",
+            )
+
+            plain_result = self.run_cli(
+                "run", "--root", str(root),
+                "--assignment-id", "course-2026", "--submitter-id", "S002",
+                "--output-root", str(root / "runs-plain"),
+                env=env,
+            )
+            self.assertEqual(plain_result.returncode, 0, plain_result.stderr)
 
 
 if __name__ == "__main__":
