@@ -190,7 +190,33 @@ class ClaudeCodeHistoryAdapter:
             # A reset (start_index == 0 with a nonempty previous position) means the
             # transcript rotated; its old pending state refers to record indexes that
             # no longer mean anything in the new file, so it must not be restored.
-            reset = bool(previous_position) and start_index == 0
+            rotated = bool(previous_position) and start_index == 0
+            # The checkpoint's records_read advances past every line it reads,
+            # regardless of since/until (the window is only applied to the final
+            # events list below). If a later import widens the window relative to
+            # what was previously requested, the earlier run's records_read would
+            # otherwise permanently hide events that were read once but filtered
+            # out and never written anywhere — so a widened window forces a full
+            # re-parse of this candidate, the same way a rotation does.
+            previous_since = (
+                None if rotated or not previous_position else _parse_iso(previous_position.get("since"))
+            )
+            previous_until = (
+                None if rotated or not previous_position else _parse_iso(previous_position.get("until"))
+            )
+            widened = bool(previous_position) and not rotated and _window_widened(
+                context.since, context.until, previous_since, previous_until
+            )
+            if widened:
+                key = (
+                    "window_widened",
+                    "the requested time window widened relative to a previous "
+                    "checkpoint; re-scanning the full transcript to recover "
+                    "previously out-of-window events",
+                )
+                diagnostic_counts[key] = diagnostic_counts.get(key, 0) + 1
+                start_index = 0
+            reset = rotated or widened
             previous_records_read = (
                 0 if reset else (previous_position or {}).get("records_read", 0)
             )
@@ -208,7 +234,15 @@ class ClaudeCodeHistoryAdapter:
             )
             for key, count in session.diagnostic_counts.items():
                 diagnostic_counts[key] = diagnostic_counts.get(key, 0) + count
-            positions[candidate.candidate_id] = session.position()
+            position = session.position()
+            if previous_position is None or rotated:
+                # Nothing to union with yet: this window is the only one on record.
+                position["since"] = _iso_or_none(context.since)
+                position["until"] = _iso_or_none(context.until)
+            else:
+                position["since"] = _widest_since(context.since, previous_since)
+                position["until"] = _widest_until(context.until, previous_until)
+            positions[candidate.candidate_id] = position
         events = [event for event in events if _in_window(event, context)]
         diagnostics = tuple(
             Diagnostic(kind=kind, summary=summary, count=count)
@@ -242,6 +276,44 @@ def _in_window(event: Event, context: DiscoveryContext) -> bool:
     if context.until is not None and event.timestamp > context.until:
         return False
     return True
+
+
+def _parse_iso(value: object) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    normalized = value.strip()
+    if normalized.endswith("Z"):
+        normalized = f"{normalized[:-1]}+00:00"
+    return datetime.fromisoformat(normalized)
+
+
+def _iso_or_none(value: datetime | None) -> str | None:
+    return None if value is None else value.isoformat().replace("+00:00", "Z")
+
+
+def _window_widened(
+    since: datetime | None,
+    until: datetime | None,
+    previous_since: datetime | None,
+    previous_until: datetime | None,
+) -> bool:
+    # None means "unbounded on this side"; once unbounded has ever been seen for
+    # a side, nothing can widen it further on that side.
+    since_widened = previous_since is not None and (since is None or since < previous_since)
+    until_widened = previous_until is not None and (until is None or until > previous_until)
+    return since_widened or until_widened
+
+
+def _widest_since(since: datetime | None, previous_since: datetime | None) -> str | None:
+    if since is None or previous_since is None:
+        return None
+    return _iso_or_none(min(since, previous_since))
+
+
+def _widest_until(until: datetime | None, previous_until: datetime | None) -> str | None:
+    if until is None or previous_until is None:
+        return None
+    return _iso_or_none(max(until, previous_until))
 
 
 def _first_line_hash(path: Path) -> str | None:

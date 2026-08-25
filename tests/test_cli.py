@@ -204,6 +204,32 @@ class CliTests(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertFalse((root / ".loopmetry" / "events").exists())
 
+    def test_history_import_fails_closed_on_corrupt_existing_output(self) -> None:
+        # A pre-existing output file that fails to parse must never be treated
+        # as "no prior evidence" and silently overwritten with only this run's
+        # events -- that would delete everything previously imported.
+        with tempfile.TemporaryDirectory() as tmp:
+            root, claude_home = self._make_history_project(Path(tmp))
+            output = root / ".loopmetry" / "events" / "claude-code-history.jsonl"
+            output.parent.mkdir(parents=True)
+            output.write_text("{not valid json\n", encoding="utf-8")
+            original = output.read_text(encoding="utf-8")
+
+            result = self.run_cli(
+                "history",
+                "import",
+                "--source",
+                "claude-code",
+                "--root",
+                str(root),
+                "--yes",
+                env={**os.environ, "LOOPMETRY_CLAUDE_HOME": str(claude_home)},
+            )
+            self.assertEqual(result.returncode, 2)
+            self.assertEqual(output.read_text(encoding="utf-8"), original)
+            checkpoint = root / ".loopmetry" / "checkpoints" / "claude-code-history.json"
+            self.assertFalse(checkpoint.exists())
+
     def test_history_import_with_yes_writes_events_and_checkpoint(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root, claude_home = self._make_history_project(Path(tmp))

@@ -276,6 +276,50 @@ class ImportTests(unittest.TestCase):
         self.assertEqual(len(run.events), 1)
         self.assertEqual(run.events[0].timestamp.isoformat(), "2026-01-01T00:00:00+00:00")
 
+    def test_widening_since_after_narrow_import_recovers_earlier_events(self) -> None:
+        # A narrow first import must not permanently strand the out-of-window
+        # record behind the checkpoint's records_read cursor: re-importing with
+        # an earlier --since must still be able to recover it.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "work" / "project"
+            root.mkdir(parents=True)
+            claude_home = Path(tmp) / "claude-home"
+            project_dir = claude_home / "projects" / encode_claude_project_dir(root)
+            old = _record(
+                "user",
+                cwd=str(root),
+                timestamp="2026-08-01T00:00:00Z",
+                message={"role": "user", "content": "old"},
+            )
+            recent = _record(
+                "user",
+                cwd=str(root),
+                timestamp="2026-08-20T00:00:00Z",
+                message={"role": "user", "content": "recent"},
+            )
+            _write_session(project_dir, "sess.jsonl", [old, recent])
+            adapter = ClaudeCodeHistoryAdapter(claude_home=claude_home)
+            narrow = DiscoveryContext(
+                project_root=root, since=datetime(2026, 8, 10, tzinfo=timezone.utc)
+            )
+            first = adapter.import_candidates(adapter.discover(narrow), narrow)
+            self.assertEqual(len(first.events), 1)
+            self.assertEqual(
+                first.events[0].timestamp.isoformat(), "2026-08-20T00:00:00+00:00"
+            )
+
+            wide = DiscoveryContext(
+                project_root=root, since=datetime(2026, 1, 1, tzinfo=timezone.utc)
+            )
+            second = adapter.import_candidates(
+                adapter.discover(wide), wide, checkpoint=first.checkpoint
+            )
+            timestamps = sorted(e.timestamp.isoformat() for e in second.events)
+            self.assertEqual(
+                timestamps, ["2026-08-01T00:00:00+00:00", "2026-08-20T00:00:00+00:00"]
+            )
+            self.assertIn("window_widened", {d.kind for d in second.diagnostics})
+
 
 class IncrementalImportTests(unittest.TestCase):
     def test_second_import_with_checkpoint_only_reads_new_records(self) -> None:

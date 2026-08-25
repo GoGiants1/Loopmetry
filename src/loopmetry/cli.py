@@ -514,10 +514,13 @@ def _run_history(args: argparse.Namespace) -> int:
             if args.output
             else root / ".loopmetry" / "events" / "claude-code-history.jsonl"
         )
-        try:
-            existing_events = load_jsonl(output_path) if output_path.exists() else []
-        except InputError:
-            existing_events = []
+        # Fail closed: a corrupt or unparsable existing output file must never be
+        # treated as "no prior evidence" and silently overwritten with only this
+        # run's events (that would delete everything previously imported). The
+        # checkpoint from this run has not been saved yet, so raising here leaves
+        # both the output file and the checkpoint untouched — safe to retry once
+        # the file is fixed or removed by hand.
+        existing_events = load_jsonl(output_path) if output_path.exists() else []
 
         by_id: dict[str, Event] = {event.event_id: event for event in existing_events}
         for event in run.events:
