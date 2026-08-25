@@ -461,11 +461,32 @@ class IntegrateTests(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 2)
 
-    def test_source_codex_not_yet_supported(self) -> None:
+    def _codex_config_path(self, root: Path) -> Path:
+        return root / ".codex" / "config.toml"
+
+    def test_integrate_codex_apply_creates_config_toml(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            result = self.run_cli("integrate", "codex", "--root", str(root), "--preview")
+            result = self.run_cli("integrate", "codex", "--root", str(root), "--apply")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            content = self._codex_config_path(root).read_text(encoding="utf-8")
+            self.assertIn("loopmetry capture-hook --source codex", content)
+
+    def test_integrate_codex_apply_on_existing_file_requires_force(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_dir = root / ".codex"
+            config_dir.mkdir()
+            (config_dir / "config.toml").write_text('[model]\nname = "gpt-5"\n', encoding="utf-8")
+            result = self.run_cli("integrate", "codex", "--root", str(root), "--apply")
             self.assertEqual(result.returncode, 2)
+
+    def test_integrate_codex_remove_is_noop_without_existing_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            result = self.run_cli("integrate", "codex", "--root", str(root), "--remove")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse(self._codex_config_path(root).exists())
 
     def test_changing_project_id_replaces_hook_instead_of_adding_a_second_one(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

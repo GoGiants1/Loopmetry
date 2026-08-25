@@ -36,6 +36,7 @@ from .hook_capture import (
     normalize_hook_payload,
 )
 from .hook_integration import format_settings, merge_settings, remove_settings
+from .hook_integration_codex import merge_config, remove_config
 from .io import InputError, load_jsonl, select_project
 from .llm_bundle import BundleError, build_evaluation_bundle, render_evaluation_bundle
 from .report import render
@@ -407,7 +408,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "integrate",
         help="Preview, apply, or remove local hook configuration for a capture source.",
     )
-    integrate.add_argument("source", choices=("claude-code",))
+    integrate.add_argument("source", choices=("claude-code", "codex"))
     integrate.add_argument("--root", default=".")
     integrate.add_argument(
         "--project-id", default=None, help="Embed a fixed --project-id in the generated hook command."
@@ -441,6 +442,12 @@ def _write_events_atomically(path: Path, events: Sequence[Event]) -> None:
 
 
 def _run_integrate(args: argparse.Namespace) -> int:
+    if args.source == "codex":
+        return _run_integrate_codex(args)
+    return _run_integrate_claude_code(args)
+
+
+def _run_integrate_claude_code(args: argparse.Namespace) -> int:
     root = Path(args.root).expanduser()
     path = root / ".claude" / "settings.local.json"
     existing_text = path.read_text(encoding="utf-8") if path.is_file() else None
@@ -463,7 +470,34 @@ def _run_integrate(args: argparse.Namespace) -> int:
 
     old_text = existing_text or ""
     new_text = format_settings(merged) if changed else old_text
+    return _finish_integrate(args, path, existing_text, old_text, new_text)
 
+
+def _run_integrate_codex(args: argparse.Namespace) -> int:
+    root = Path(args.root).expanduser()
+    path = root / ".codex" / "config.toml"
+    existing_text = path.read_text(encoding="utf-8") if path.is_file() else None
+    old_text = existing_text or ""
+    try:
+        if args.remove:
+            new_text, changed = remove_config(old_text)
+        else:
+            new_text, changed = merge_config(old_text, args.project_id)
+    except ValueError as exc:
+        raise InputError(f"{path}: {exc}; fix or remove it manually") from exc
+    if not changed:
+        new_text = old_text
+    return _finish_integrate(args, path, existing_text, old_text, new_text)
+
+
+def _finish_integrate(
+    args: argparse.Namespace,
+    path: Path,
+    existing_text: str | None,
+    old_text: str,
+    new_text: str,
+) -> int:
+    changed = new_text != old_text
     if args.preview:
         if not changed:
             print("no changes needed")
