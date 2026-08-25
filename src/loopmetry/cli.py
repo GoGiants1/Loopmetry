@@ -641,8 +641,11 @@ def _consented_history_import(
     if merged_events or output_path.exists():
         _write_events_atomically(output_path, merged_events)
 
-        if run.checkpoint is not None:
-            save_checkpoint(root, run.checkpoint)
+    # Checkpoint progress is independent of whether this import emitted an
+    # event. In particular, D-013 stores unresolved Bash tool_use state in the
+    # checkpoint so a later tool_result can complete it after an append.
+    if run.checkpoint is not None:
+        save_checkpoint(root, run.checkpoint)
 
     new_count = len(by_id) - len(existing_events)
     diagnostic_summary = ", ".join(f"{d.kind}={d.count}" for d in run.diagnostics) or "none"

@@ -304,6 +304,73 @@ class CliTests(unittest.TestCase):
             after = stat.S_IMODE(root.stat().st_mode)
             self.assertEqual(before, after)
 
+    def test_history_import_saves_pending_checkpoint_without_empty_event_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "work" / "project"
+            root.mkdir(parents=True)
+            claude_home = Path(tmp) / "claude-home"
+            project_dir = claude_home / "projects" / encode_claude_project_dir(root)
+            project_dir.mkdir(parents=True)
+            record = {
+                "type": "assistant",
+                "sessionId": "sess-1",
+                "timestamp": "2026-08-20T09:00:00Z",
+                "cwd": str(root),
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "tool-1",
+                            "name": "Bash",
+                            "input": {"command": "uv run python -m unittest"},
+                        }
+                    ],
+                },
+            }
+            transcript = project_dir / "sess.jsonl"
+            transcript.write_text(json.dumps(record) + "\n", encoding="utf-8")
+
+            output = root / ".loopmetry" / "events" / "claude-code-history.jsonl"
+            result = self.run_cli(
+                "history", "import", "--source", "claude-code",
+                "--root", str(root), "--yes",
+                env={**os.environ, "LOOPMETRY_CLAUDE_HOME": str(claude_home)},
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse(output.exists())
+            checkpoint_path = root / ".loopmetry" / "checkpoints" / "claude-code-history.json"
+            checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+            position = next(iter(checkpoint["positions"].values()))
+            self.assertIn("tool-1", position["pending"])
+
+            result_record = {
+                "type": "user",
+                "sessionId": "sess-1",
+                "timestamp": "2026-08-20T09:00:01Z",
+                "cwd": str(root),
+                "message": {
+                    "role": "user",
+                    "content": [
+                        {"type": "tool_result", "tool_use_id": "tool-1", "is_error": False}
+                    ],
+                },
+            }
+            with transcript.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(result_record) + "\n")
+            second = self.run_cli(
+                "history", "import", "--source", "claude-code",
+                "--root", str(root), "--yes",
+                env={**os.environ, "LOOPMETRY_CLAUDE_HOME": str(claude_home)},
+            )
+
+            self.assertEqual(second.returncode, 0, second.stderr)
+            events = load_jsonl(output)
+            self.assertEqual(len(events), 2)
+            command = next(event for event in events if event.type.value == "command")
+            self.assertEqual(command.data["status"], "success")
+
 
 class IntegrateTests(unittest.TestCase):
     def run_cli(
