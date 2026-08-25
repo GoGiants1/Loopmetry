@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from . import __version__
-from .adapters.base import AdapterError, DiscoveryContext
+from .adapters.base import AdapterError, AdapterRun, DiscoveryContext, SourceAdapter
 from .adapters.checkpoints import atomic_write_bytes, load_checkpoint, save_checkpoint
 from .adapters.claude_code_history import ClaudeCodeHistoryAdapter
 from .admin_server import (
@@ -480,6 +480,90 @@ def _run_integrate(args: argparse.Namespace) -> int:
     return 0
 
 
+def _consented_history_import(
+    adapter: SourceAdapter,
+    context: DiscoveryContext,
+    root: Path,
+    *,
+    interactive: bool,
+    output_path: Path,
+) -> AdapterRun | None:
+    """Runs the interactive double-confirmation, then discovers, previews,
+    imports, merges into output_path, and saves the checkpoint.
+
+    Callers own the non-interactive consent gate before calling this: history
+    import hard-fails without --yes, while run --source auto silently skips
+    the call entirely. Once called, the interactive prompts below are asked
+    unconditionally when interactive=True, matching history import's existing
+    behavior regardless of any consent flag.
+    """
+    if interactive:
+        scan_answer = input(
+            "Scan local Claude Code history for this project to preview "
+            "importable sessions? [y/N] "
+        ).strip().lower()
+        if scan_answer != "y":
+            print("import cancelled")
+            return None
+
+    candidates = adapter.discover(context)
+    preview = adapter.preview(candidates)
+
+    if interactive:
+        print(
+            f"{preview.session_count} session(s), {preview.total_size_bytes} byte(s) "
+            "of local Claude Code history will be read."
+        )
+        answer = input("Proceed with import? [y/N] ").strip().lower()
+        if answer != "y":
+            print("import cancelled")
+            return None
+
+    try:
+        checkpoint = load_checkpoint(root, adapter.name)
+    except AdapterError as exc:
+        print(f"warning: {exc}; re-importing without a checkpoint", file=sys.stderr)
+        checkpoint = None
+
+    run = adapter.import_candidates(candidates, context, checkpoint=checkpoint)
+
+    # Fail closed: a corrupt or unparsable existing output file must never be
+    # treated as "no prior evidence" and silently overwritten with only this
+    # run's events (that would delete everything previously imported). The
+    # checkpoint from this run has not been saved yet, so raising here leaves
+    # both the output file and the checkpoint untouched -- safe to retry once
+    # the file is fixed or removed by hand.
+    existing_events = load_jsonl(output_path) if output_path.exists() else []
+
+    by_id: dict[str, Event] = {event.event_id: event for event in existing_events}
+    for event in run.events:
+        existing = by_id.get(event.event_id)
+        if existing is None:
+            by_id[event.event_id] = event
+            continue
+        # Overlapping observations merge without losing provenance (invariant
+        # 10); a genuine content conflict under the same event_id is an error,
+        # matching io.load_jsonl and EventStore.add_events elsewhere.
+        try:
+            by_id[event.event_id] = merge_events(existing, event)
+        except EventConflictError as exc:
+            raise InputError(
+                f"{output_path}: conflicting duplicate event_id {event.event_id!r}"
+            ) from exc
+    merged_events = sorted(by_id.values(), key=lambda event: (event.timestamp, event.event_id))
+    _write_events_atomically(output_path, merged_events)
+
+    if run.checkpoint is not None:
+        save_checkpoint(root, run.checkpoint)
+
+    new_count = len(by_id) - len(existing_events)
+    diagnostic_summary = ", ".join(f"{d.kind}={d.count}" for d in run.diagnostics) or "none"
+    print(f"imported {new_count} new event(s); {len(merged_events)} total in {output_path}")
+    print(f"diagnostics: {diagnostic_summary}")
+    print(f"coverage: {run.coverage.to_mapping()['categories']}")
+    return run
+
+
 def _run_history(args: argparse.Namespace) -> int:
     root = Path(args.root).expanduser()
     since = _parse_since(args.since)
@@ -561,90 +645,23 @@ def _run_history(args: argparse.Namespace) -> int:
         return 0
 
     if args.history_command == "import":
-        # Consent must be checked before any transcript content is read at all —
+        # Consent must be checked before any transcript content is read at all --
         # discover() itself opens and JSON-parses the first lines of every
         # candidate file to confirm its cwd, so calling it before this check
         # would mean a rejected non-interactive run had already read local
-        # history. Interactive mode asks twice: once to scan at all, and again
-        # (with real counts) before actually importing.
-        if interactive:
-            scan_answer = input(
-                "Scan local Claude Code history for this project to preview "
-                "importable sessions? [y/N] "
-            ).strip().lower()
-            if scan_answer != "y":
-                print("import cancelled")
-                return 0
-        elif not args.yes:
+        # history.
+        if not interactive and not args.yes:
             raise InputError(
                 "loopmetry history import requires --yes when not run interactively "
                 "(this flag is the explicit consent to read local history)"
             )
-
-        candidates = adapter.discover(context)
-        preview = adapter.preview(candidates)
-
-        if interactive:
-            print(
-                f"{preview.session_count} session(s), {preview.total_size_bytes} byte(s) "
-                "of local Claude Code history will be read."
-            )
-            answer = input("Proceed with import? [y/N] ").strip().lower()
-            if answer != "y":
-                print("import cancelled")
-                return 0
-
-        try:
-            checkpoint = load_checkpoint(root, adapter.name)
-        except AdapterError as exc:
-            print(f"warning: {exc}; re-importing without a checkpoint", file=sys.stderr)
-            checkpoint = None
-
-        run = adapter.import_candidates(candidates, context, checkpoint=checkpoint)
 
         output_path = (
             Path(args.output).expanduser()
             if args.output
             else root / ".loopmetry" / "events" / "claude-code-history.jsonl"
         )
-        # Fail closed: a corrupt or unparsable existing output file must never be
-        # treated as "no prior evidence" and silently overwritten with only this
-        # run's events (that would delete everything previously imported). The
-        # checkpoint from this run has not been saved yet, so raising here leaves
-        # both the output file and the checkpoint untouched — safe to retry once
-        # the file is fixed or removed by hand.
-        existing_events = load_jsonl(output_path) if output_path.exists() else []
-
-        by_id: dict[str, Event] = {event.event_id: event for event in existing_events}
-        for event in run.events:
-            existing = by_id.get(event.event_id)
-            if existing is None:
-                by_id[event.event_id] = event
-                continue
-            # Overlapping observations merge without losing provenance (invariant
-            # 10); a genuine content conflict under the same event_id is an error,
-            # matching io.load_jsonl and EventStore.add_events elsewhere.
-            try:
-                by_id[event.event_id] = merge_events(existing, event)
-            except EventConflictError as exc:
-                raise InputError(
-                    f"{output_path}: conflicting duplicate event_id {event.event_id!r}"
-                ) from exc
-        merged_events = sorted(by_id.values(), key=lambda event: (event.timestamp, event.event_id))
-        _write_events_atomically(output_path, merged_events)
-
-        if run.checkpoint is not None:
-            save_checkpoint(root, run.checkpoint)
-
-        new_count = len(by_id) - len(existing_events)
-        diagnostic_summary = (
-            ", ".join(f"{d.kind}={d.count}" for d in run.diagnostics) or "none"
-        )
-        print(
-            f"imported {new_count} new event(s); {len(merged_events)} total in {output_path}"
-        )
-        print(f"diagnostics: {diagnostic_summary}")
-        print(f"coverage: {run.coverage.to_mapping()['categories']}")
+        _consented_history_import(adapter, context, root, interactive=interactive, output_path=output_path)
         return 0
 
     raise AssertionError(f"unhandled history command: {args.history_command}")
