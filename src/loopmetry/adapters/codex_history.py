@@ -20,11 +20,13 @@ and never copied; only canonical minimized events leave this module.
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Mapping
+from typing import Any, Mapping
 
-from ..schema import CaptureMode
+from ..minimize import canonical_hash, command_signature, hash_text
+from ..schema import Actor, CaptureMode, Event, EventType
 from .base import (
     AdapterCapabilities,
     Diagnostic,
@@ -127,3 +129,292 @@ class CodexHistoryAdapter:
             )
         self.last_discovery_diagnostics = tuple(diagnostics)
         return tuple(sorted(candidates, key=lambda c: c.label))
+
+
+_UPDATE_FILE_RE = re.compile(r"^\*\*\* (?:Update|Add) File: (.+)$", re.MULTILINE)
+
+
+def _patch_target_path(patch_text: str) -> str | None:
+    match = _UPDATE_FILE_RE.search(patch_text)
+    if not match:
+        return None
+    return match.group(1).strip() or None
+
+
+class _SessionParser:
+    """Streams one rollout file, pairing call_id across function_call/output and
+    local_shell_call records (D-013's pending/finalization contract, generalized:
+    Codex has two structurally different call shapes that both need it -- see
+    codex_history.py's module docstring for the verified schema)."""
+
+    def __init__(
+        self,
+        *,
+        path: Path,
+        project_id: str,
+        start_index: int,
+        pending_seed: Mapping[str, Mapping[str, Any]],
+    ) -> None:
+        self.path = path
+        self.project_id = project_id
+        self.start_index = start_index
+        self.pending: dict[str, dict[str, Any]] = {
+            key: dict(value) for key, value in pending_seed.items()
+        }
+        self.session_id = path.stem
+        self.total_lines = 0
+        self.diagnostic_counts: dict[tuple[str, str], int] = {}
+        self.emitted_command = False
+
+    def _count(self, kind: str, summary: str) -> None:
+        key = (kind, summary)
+        self.diagnostic_counts[key] = self.diagnostic_counts.get(key, 0) + 1
+
+    def _event(
+        self,
+        index: int,
+        timestamp: str,
+        event_type: EventType,
+        actor: Actor,
+        data: Mapping[str, Any],
+        *,
+        suffix: str,
+        call_id: str | None = None,
+    ) -> Event:
+        stable = {"session": self.session_id, "file": self.path.name, "index": index, "suffix": suffix}
+        event_id = f"hist-{canonical_hash(stable)[:24]}"
+        source_ref: dict[str, Any] = {"session_file": self.path.name, "record_index": index}
+        if call_id is not None:
+            source_ref["call_id"] = call_id
+        return Event.from_mapping(
+            {
+                "schema_version": "0.2",
+                "event_id": event_id,
+                "project_id": self.project_id,
+                "session_id": self.session_id,
+                "timestamp": timestamp,
+                "type": event_type.value,
+                "actor": actor.value,
+                "source": _EVENT_SOURCE,
+                "data": dict(data),
+                "provenance": [
+                    {
+                        "source": _EVENT_SOURCE,
+                        "capture_mode": "history-backfill",
+                        "adapter_version": CODEX_HISTORY_ADAPTER_VERSION,
+                        "source_ref": source_ref,
+                    }
+                ],
+            }
+        )
+
+    def parse(self) -> list[Event]:
+        events: list[Event] = []
+        line_count = 0
+        try:
+            with self.path.open("r", encoding="utf-8", errors="replace") as handle:
+                for index, line in enumerate(handle):
+                    if not line.endswith("\n"):
+                        break
+                    line_count = index + 1
+                    if index < self.start_index:
+                        continue
+                    stripped = line.strip()
+                    if not stripped:
+                        continue
+                    if len(line.encode("utf-8", errors="replace")) > _MAX_RECORD_BYTES:
+                        self._count("truncated_input", "oversized rollout record skipped")
+                        continue
+                    try:
+                        record = json.loads(stripped)
+                    except json.JSONDecodeError:
+                        self._count("unparsed_record", "malformed JSON line")
+                        continue
+                    if not isinstance(record, Mapping):
+                        self._count("unparsed_record", "malformed JSON line")
+                        continue
+                    timestamp = record.get("timestamp")
+                    if not isinstance(timestamp, str) or not timestamp.strip():
+                        self._count("unparsed_record", "record missing timestamp")
+                        continue
+                    envelope_type = record.get("type")
+                    payload = record.get("payload")
+                    if envelope_type == "session_meta":
+                        continue
+                    if envelope_type != "response_item" or not isinstance(payload, Mapping):
+                        self._count(
+                            "skipped_record_type",
+                            f"records of envelope type {envelope_type!r} are not imported",
+                        )
+                        continue
+                    events.extend(self._handle_response_item(payload, index, timestamp))
+        except OSError:
+            pass
+        self.total_lines = line_count
+        return events
+
+    def _handle_response_item(
+        self, payload: Mapping[str, Any], index: int, timestamp: str
+    ) -> list[Event]:
+        item_type = payload.get("type")
+        if item_type == "message":
+            return self._handle_message(payload, index, timestamp)
+        if item_type == "local_shell_call":
+            return self._handle_local_shell_call(payload, index, timestamp)
+        if item_type == "function_call":
+            return self._handle_function_call(payload, index, timestamp)
+        if item_type == "function_call_output":
+            return self._handle_function_call_output(payload, timestamp)
+        self._count(
+            "skipped_record_type", f"response_item type {item_type!r} is not imported"
+        )
+        return []
+
+    def _handle_message(
+        self, payload: Mapping[str, Any], index: int, timestamp: str
+    ) -> list[Event]:
+        if payload.get("role") != "user":
+            return []
+        content = payload.get("content")
+        if not isinstance(content, list):
+            return []
+        text = "".join(
+            str(block.get("text", ""))
+            for block in content
+            if isinstance(block, Mapping) and block.get("type") == "input_text"
+        )
+        if not text:
+            return []
+        return [
+            self._event(
+                index,
+                timestamp,
+                EventType.HUMAN_INTERVENTION,
+                Actor.HUMAN,
+                {
+                    "action": "prompt",
+                    "summary": "User submitted a prompt; content omitted.",
+                    "prompt_sha256": hash_text(text),
+                    "prompt_length": len(text),
+                },
+                suffix=f"prompt-{index}",
+            )
+        ]
+
+    def _pending_entry(self, index: int, command: list[str], timestamp: str) -> dict[str, Any]:
+        joined = " ".join(str(part) for part in command)
+        label, verification_kind = command_signature(joined)
+        return {
+            "record_index": index,
+            "command_label": label,
+            "command_sha256": hash_text(joined),
+            "verification_kind": verification_kind,
+            "timestamp": timestamp,
+            "is_apply_patch": bool(command) and command[0] == "apply_patch",
+            "patch_target": _patch_target_path(command[1]) if len(command) > 1 and command[0] == "apply_patch" else None,
+        }
+
+    def _resolve(self, call_id: str, entry: Mapping[str, Any]) -> list[Event]:
+        record_index = int(entry["record_index"])
+        timestamp = str(entry["timestamp"])
+        if entry.get("is_apply_patch"):
+            path = entry.get("patch_target")
+            if path is None:
+                self._count("unextractable_path", "an apply_patch call's target path could not be extracted")
+                return []
+            return [
+                self._event(
+                    record_index,
+                    timestamp,
+                    EventType.FILE_CHANGE,
+                    Actor.AGENT,
+                    {"path": path, "action": "modify"},
+                    suffix=f"change-{record_index}-{path}",
+                    call_id=call_id,
+                )
+            ]
+        self.emitted_command = True
+        return [
+            self._event(
+                record_index,
+                timestamp,
+                EventType.COMMAND,
+                Actor.TOOL,
+                {
+                    "command": entry["command_label"],
+                    "status": "unknown",
+                    "command_sha256": entry["command_sha256"],
+                    "tool_name": "Bash",
+                },
+                suffix=f"command-{record_index}",
+                call_id=call_id,
+            )
+        ]
+
+    def _handle_local_shell_call(
+        self, payload: Mapping[str, Any], index: int, timestamp: str
+    ) -> list[Event]:
+        call_id = payload.get("call_id")
+        action = payload.get("action")
+        if not isinstance(call_id, str) or not isinstance(action, Mapping):
+            self._count("unextractable_command", "a local_shell_call's call_id or action was missing")
+            return []
+        command = action.get("command")
+        if not isinstance(command, list) or not command:
+            self._count("unextractable_command", "a local_shell_call's command array was missing")
+            return []
+        status = payload.get("status")
+        if status == "in_progress":
+            self.pending[call_id] = self._pending_entry(index, command, timestamp)
+            return []
+        entry = self.pending.pop(call_id, None) or self._pending_entry(index, command, timestamp)
+        return self._resolve(call_id, entry)
+
+    def _handle_function_call(
+        self, payload: Mapping[str, Any], index: int, timestamp: str
+    ) -> list[Event]:
+        call_id = payload.get("call_id")
+        arguments_raw = payload.get("arguments")
+        if not isinstance(call_id, str) or not isinstance(arguments_raw, str):
+            self._count("unextractable_command", "a function_call's call_id or arguments were missing")
+            return []
+        try:
+            arguments = json.loads(arguments_raw)
+        except json.JSONDecodeError:
+            self._count("unextractable_command", "a function_call's arguments were not valid JSON")
+            return []
+        command = arguments.get("command") if isinstance(arguments, Mapping) else None
+        if not isinstance(command, list) or not command:
+            self._count("unextractable_command", "a function_call had no extractable command")
+            return []
+        self.pending[call_id] = self._pending_entry(index, command, timestamp)
+        return []
+
+    def _handle_function_call_output(self, payload: Mapping[str, Any], timestamp: str) -> list[Event]:
+        call_id = payload.get("call_id")
+        if not isinstance(call_id, str):
+            return []
+        entry = self.pending.pop(call_id, None)
+        if entry is None:
+            return []
+        return self._resolve(call_id, entry)
+
+    def finalize_stalled(self, *, previous_records_read: int) -> list[Event]:
+        file_did_not_grow = self.total_lines == previous_records_read
+        events: list[Event] = []
+        for call_id in list(self.pending):
+            entry = self.pending[call_id]
+            was_already_pending = entry["record_index"] < previous_records_read
+            if file_did_not_grow and was_already_pending:
+                self._count("stalled_tool_call", "a call's result never arrived; session appears stalled")
+                events.extend(self._resolve(call_id, entry))
+                del self.pending[call_id]
+            else:
+                self._count("unresolved_tool_call", "a call is awaiting its result")
+        return events
+
+    def position(self) -> dict[str, Any]:
+        return {
+            "records_read": self.total_lines,
+            "pending": {key: dict(value) for key, value in self.pending.items()},
+        }

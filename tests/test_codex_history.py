@@ -7,7 +7,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from loopmetry.adapters.base import DiscoveryContext
+from loopmetry.adapters.base import Coverage, DiscoveryContext
+from loopmetry.adapters.base import DiscoveryContext as _DC
 from loopmetry.adapters.codex_history import CodexHistoryAdapter
 
 
@@ -100,6 +101,117 @@ class DiscoveryTests(unittest.TestCase):
                 since=datetime(2999, 1, 1, tzinfo=timezone.utc),
             )
             self.assertEqual(len(adapter.discover(future)), 1)
+
+
+def _response_item(payload: dict, timestamp: str = "2026-08-20T09:01:00Z") -> dict:
+    return {"timestamp": timestamp, "type": "response_item", "payload": payload}
+
+
+def _user_message(text: str, timestamp: str = "2026-08-20T09:01:00Z") -> dict:
+    return _response_item(
+        {"type": "message", "role": "user", "content": [{"type": "input_text", "text": text}]},
+        timestamp,
+    )
+
+
+def _local_shell_call(
+    call_id: str, command: list[str], status: str = "completed", timestamp: str = "2026-08-20T09:01:05Z"
+) -> dict:
+    return _response_item(
+        {
+            "type": "local_shell_call",
+            "call_id": call_id,
+            "status": status,
+            "action": {"type": "exec", "command": command},
+        },
+        timestamp,
+    )
+
+
+def _function_call(call_id: str, name: str, arguments: dict, timestamp: str = "2026-08-20T09:01:05Z") -> dict:
+    return _response_item(
+        {
+            "type": "function_call",
+            "call_id": call_id,
+            "name": name,
+            "arguments": json.dumps(arguments),
+        },
+        timestamp,
+    )
+
+
+def _function_call_output(call_id: str, output: str = "ok", timestamp: str = "2026-08-20T09:01:06Z") -> dict:
+    return _response_item({"type": "function_call_output", "call_id": call_id, "output": output}, timestamp)
+
+
+class ImportTests(unittest.TestCase):
+    def _import(self, records: list[dict]):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "work" / "project"
+            root.mkdir(parents=True)
+            codex_home = Path(tmp) / "codex-home"
+            sessions_dir = codex_home / "sessions" / "2026" / "08" / "20"
+            full = [_session_meta(str(root))] + records
+            _write_rollout(sessions_dir, "rollout-a.jsonl", full)
+            adapter = CodexHistoryAdapter(codex_home=codex_home)
+            context = _DC(project_root=root)
+            candidates = adapter.discover(context)
+            return adapter.import_candidates(candidates, context), context
+
+    def test_user_message_becomes_human_intervention_event(self) -> None:
+        run, _ = self._import([_user_message("do the thing")])
+        self.assertEqual(len(run.events), 1)
+        event = run.events[0]
+        self.assertEqual(event.type.value, "human_intervention")
+        self.assertEqual(event.source, "codex")
+        self.assertNotIn("do the thing", json.dumps(event.data))
+
+    def test_local_shell_call_completed_in_one_record_becomes_command_with_unknown_status(self) -> None:
+        run, _ = self._import([_local_shell_call("call-1", ["bash", "-lc", "pytest"])])
+        commands = [e for e in run.events if e.type.value == "command"]
+        self.assertEqual(len(commands), 1)
+        self.assertEqual(commands[0].data["status"], "unknown")
+        self.assertEqual(commands[0].data["command"], "pytest")
+        kinds = [d.kind for d in run.diagnostics]
+        self.assertIn("command_status_unavailable", kinds)
+
+    def test_apply_patch_call_becomes_file_change_event(self) -> None:
+        patch = "*** Begin Patch\n*** Update File: src/app.py\n@@\n-old\n+new\n*** End Patch"
+        run, _ = self._import([_local_shell_call("call-2", ["apply_patch", patch])])
+        changes = [e for e in run.events if e.type.value == "file_change"]
+        self.assertEqual(len(changes), 1)
+        self.assertEqual(changes[0].data["path"], "src/app.py")
+
+    def test_function_call_and_output_pair_across_two_records(self) -> None:
+        run, _ = self._import(
+            [
+                _function_call("call-3", "shell", {"command": ["bash", "-lc", "ruff check ."]}),
+                _function_call_output("call-3", "0 errors"),
+            ]
+        )
+        commands = [e for e in run.events if e.type.value == "command"]
+        self.assertEqual(len(commands), 1)
+        self.assertEqual(commands[0].data["status"], "unknown")
+
+    def test_unresolved_call_is_pending_not_dropped(self) -> None:
+        run, _ = self._import([_function_call("call-4", "shell", {"command": ["bash", "-lc", "sleep 1"]})])
+        self.assertEqual([e for e in run.events if e.type.value == "command"], [])
+        kinds = [d.kind for d in run.diagnostics]
+        self.assertIn("unresolved_tool_call", kinds)
+        self.assertIsNotNone(run.checkpoint)
+        positions = run.checkpoint.positions
+        pending = next(iter(positions.values()))["pending"]
+        self.assertIn("call-4", pending)
+
+    def test_unknown_response_item_type_is_diagnosed_not_dropped_silently(self) -> None:
+        run, _ = self._import([_response_item({"type": "reasoning", "summary": []})])
+        self.assertEqual(run.events, ())
+        kinds = [d.kind for d in run.diagnostics]
+        self.assertIn("skipped_record_type", kinds)
+
+    def test_coverage_is_partial_when_any_command_is_emitted(self) -> None:
+        run, _ = self._import([_local_shell_call("call-5", ["bash", "-lc", "pytest"])])
+        self.assertEqual(run.coverage.categories["commands"], Coverage.PARTIAL)
 
 
 if __name__ == "__main__":
