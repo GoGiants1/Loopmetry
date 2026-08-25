@@ -23,14 +23,19 @@ import json
 import re
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
-from ..minimize import canonical_hash, command_signature, hash_text, safe_relative_path
+from ..minimize import canonical_hash, command_signature, derive_project_id, hash_text, safe_relative_path
 from ..schema import Actor, CaptureMode, Event, EventType
 from .base import (
     AdapterCapabilities,
+    AdapterRun,
+    Checkpoint,
+    Coverage,
+    CoverageReport,
     Diagnostic,
     DiscoveryContext,
+    ImportPreview,
     SourceCandidate,
 )
 
@@ -129,6 +134,132 @@ class CodexHistoryAdapter:
             )
         self.last_discovery_diagnostics = tuple(diagnostics)
         return tuple(sorted(candidates, key=lambda c: c.label))
+
+    def preview(self, candidates: Sequence[SourceCandidate]) -> ImportPreview:
+        return ImportPreview(source=self.name, candidates=tuple(candidates))
+
+    def import_candidates(
+        self,
+        candidates: Sequence[SourceCandidate],
+        context: DiscoveryContext,
+        checkpoint: Checkpoint | None = None,
+    ) -> AdapterRun:
+        project_root = Path(context.project_root).expanduser().resolve()
+        project_id = derive_project_id(str(project_root))
+        events: list[Event] = []
+        diagnostic_counts: dict[tuple[str, str], int] = {}
+        emitted_command = False
+        positions: dict[str, dict[str, Any]] = (
+            {key: dict(value) for key, value in checkpoint.positions.items()} if checkpoint else {}
+        )
+        for candidate in candidates:
+            path = Path(candidate.candidate_id)
+            previous_position = positions.get(candidate.candidate_id)
+            previous_since = _parse_iso((previous_position or {}).get("since"))
+            previous_until = _parse_iso((previous_position or {}).get("until"))
+            window_changed = bool(previous_position) and not _window_is_subset(
+                context.since, context.until, previous_since, previous_until
+            )
+            if window_changed:
+                key = (
+                    "window_widened",
+                    "the requested time window is not contained in the window "
+                    "used by the previous checkpoint advance; re-scanning the "
+                    "full rollout file to recover potentially out-of-window events",
+                )
+                diagnostic_counts[key] = diagnostic_counts.get(key, 0) + 1
+            start_index = 0 if window_changed or not previous_position else int(
+                previous_position.get("records_read", 0)
+            )
+            previous_records_read = 0 if window_changed else (previous_position or {}).get("records_read", 0)
+            pending_seed = {} if window_changed else (previous_position or {}).get("pending", {})
+            session = _SessionParser(
+                path=path,
+                project_id=project_id,
+                project_root=project_root,
+                start_index=start_index,
+                pending_seed=pending_seed,
+            )
+            events.extend(session.parse())
+            events.extend(session.finalize_stalled(previous_records_read=previous_records_read))
+            emitted_command = emitted_command or session.emitted_command
+            for key, count in session.diagnostic_counts.items():
+                diagnostic_counts[key] = diagnostic_counts.get(key, 0) + count
+            position = session.position()
+            position["since"] = _iso_or_none(context.since)
+            position["until"] = _iso_or_none(context.until)
+            positions[candidate.candidate_id] = position
+        events = [event for event in events if _in_window(event, context)]
+        if emitted_command:
+            key = ("command_status_unavailable", "Codex's rollout format does not persist a "
+                   "command exit-code/success signal; imported command status is always \"unknown\"")
+            diagnostic_counts[key] = diagnostic_counts.get(key, 0) + 1
+        diagnostics = tuple(
+            Diagnostic(kind=kind, summary=summary, count=count)
+            for (kind, summary), count in sorted(diagnostic_counts.items())
+        )
+        degraded = any(
+            d.kind
+            in {
+                "unparsed_record",
+                "truncated_input",
+                "unresolved_tool_call",
+                "stalled_tool_call",
+                "unextractable_command",
+                "unextractable_path",
+                "command_status_unavailable",
+            }
+            for d in diagnostics
+        )
+        coverage = CoverageReport(
+            categories={
+                category: (Coverage.PARTIAL if degraded else Coverage.FULL)
+                for category in self.capabilities().evidence_categories
+            }
+        )
+        events.sort(key=lambda event: (event.timestamp, event.event_id))
+        return AdapterRun(
+            source=self.name,
+            adapter_version=self.adapter_version,
+            events=tuple(events),
+            diagnostics=diagnostics,
+            coverage=coverage,
+            checkpoint=Checkpoint(source=self.name, positions=positions),
+        )
+
+
+def _in_window(event: Event, context: DiscoveryContext) -> bool:
+    if context.since is not None and event.timestamp < context.since:
+        return False
+    if context.until is not None and event.timestamp > context.until:
+        return False
+    return True
+
+
+def _parse_iso(value: object) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    normalized = value.strip()
+    if normalized.endswith("Z"):
+        normalized = f"{normalized[:-1]}+00:00"
+    return datetime.fromisoformat(normalized)
+
+
+def _iso_or_none(value: datetime | None) -> str | None:
+    return None if value is None else value.isoformat().replace("+00:00", "Z")
+
+
+def _window_is_subset(
+    since: datetime | None,
+    until: datetime | None,
+    outer_since: datetime | None,
+    outer_until: datetime | None,
+) -> bool:
+    if outer_since is not None and (since is None or since < outer_since):
+        return False
+    if outer_until is not None and (until is None or until > outer_until):
+        return False
+    return True
 
 
 _UPDATE_FILE_RE = re.compile(r"^\*\*\* (Update|Add) File: (.+)$", re.MULTILINE)

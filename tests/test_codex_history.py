@@ -269,5 +269,68 @@ class ImportTests(unittest.TestCase):
         self.assertEqual(run.coverage.categories["commands"], Coverage.PARTIAL)
 
 
+class CheckpointResumeTests(unittest.TestCase):
+    def test_second_import_only_processes_new_lines(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "work" / "project"
+            root.mkdir(parents=True)
+            codex_home = Path(tmp) / "codex-home"
+            sessions_dir = codex_home / "sessions" / "2026" / "08" / "20"
+            path = _write_rollout(
+                sessions_dir, "rollout-a.jsonl", [_session_meta(str(root)), _user_message("first")]
+            )
+            adapter = CodexHistoryAdapter(codex_home=codex_home)
+            context = _DC(project_root=root)
+            candidates = adapter.discover(context)
+            first_run = adapter.import_candidates(candidates, context)
+            self.assertEqual(len(first_run.events), 1)
+
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(_user_message("second")) + "\n")
+            candidates_again = adapter.discover(context)
+            second_run = adapter.import_candidates(
+                candidates_again, context, checkpoint=first_run.checkpoint
+            )
+            self.assertEqual(len(second_run.events), 1)
+            self.assertNotEqual(first_run.events[0].event_id, second_run.events[0].event_id)
+
+    def test_import_candidates_filters_by_event_timestamp(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "work" / "project"
+            root.mkdir(parents=True)
+            codex_home = Path(tmp) / "codex-home"
+            sessions_dir = codex_home / "sessions" / "2026" / "08" / "20"
+            _write_rollout(
+                sessions_dir,
+                "rollout-a.jsonl",
+                [
+                    _session_meta(str(root)),
+                    _user_message("old", timestamp="2020-01-01T00:00:00Z"),
+                    _user_message("new", timestamp="2026-08-20T09:01:00Z"),
+                ],
+            )
+            adapter = CodexHistoryAdapter(codex_home=codex_home)
+            from datetime import datetime, timezone
+
+            context = _DC(project_root=root, since=datetime(2025, 1, 1, tzinfo=timezone.utc))
+            candidates = adapter.discover(context)
+            run = adapter.import_candidates(candidates, context)
+            self.assertEqual(len(run.events), 1)
+
+    def test_preview_reports_session_and_size_totals(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "work" / "project"
+            root.mkdir(parents=True)
+            codex_home = Path(tmp) / "codex-home"
+            sessions_dir = codex_home / "sessions" / "2026" / "08" / "20"
+            _write_rollout(sessions_dir, "rollout-a.jsonl", [_session_meta(str(root))])
+            adapter = CodexHistoryAdapter(codex_home=codex_home)
+            context = _DC(project_root=root)
+            candidates = adapter.discover(context)
+            preview = adapter.preview(candidates)
+            self.assertEqual(preview.session_count, 1)
+            self.assertGreater(preview.total_size_bytes, 0)
+
+
 if __name__ == "__main__":
     unittest.main()
