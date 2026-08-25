@@ -266,7 +266,13 @@ class ClaudeCodeHistoryAdapter:
         )
         degraded = any(
             d.kind
-            in {"unparsed_record", "truncated_input", "unresolved_tool_call", "stalled_tool_call"}
+            in {
+                "unparsed_record",
+                "truncated_input",
+                "unresolved_tool_call",
+                "stalled_tool_call",
+                "unextractable_command",
+            }
             for d in diagnostics
         )
         coverage = CoverageReport(

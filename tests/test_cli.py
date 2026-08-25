@@ -437,6 +437,75 @@ class IntegrateTests(unittest.TestCase):
             result = self.run_cli("integrate", "codex", "--root", str(root), "--preview")
             self.assertEqual(result.returncode, 2)
 
+    def test_changing_project_id_replaces_hook_instead_of_adding_a_second_one(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.run_cli("integrate", "claude-code", "--root", str(root), "--apply")
+            result = self.run_cli(
+                "integrate",
+                "claude-code",
+                "--root",
+                str(root),
+                "--apply",
+                "--project-id",
+                "course-2026",
+                "--force",
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            data = json.loads(self._settings_path(root).read_text(encoding="utf-8"))
+            for event in ("UserPromptSubmit", "PostToolUse", "PostToolUseFailure"):
+                blocks = data["hooks"][event]
+                self.assertEqual(len(blocks), 1)
+                self.assertEqual(blocks[0]["hooks"][0]["args"][-2:], ["--project-id", "course-2026"])
+
+    def test_malformed_nested_hooks_structure_fails_closed_without_partial_write(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = self._settings_path(root)
+            path.parent.mkdir(parents=True)
+            original = json.dumps({"hooks": {"PostToolUse": "invalid"}})
+            path.write_text(original, encoding="utf-8")
+            result = self.run_cli(
+                "integrate", "claude-code", "--root", str(root), "--apply", "--force"
+            )
+            self.assertEqual(result.returncode, 2)
+            self.assertEqual(path.read_text(encoding="utf-8"), original)
+            self.assertFalse(path.with_name(path.name + ".bak").exists())
+
+    def test_remove_preserves_user_hook_outside_installer_scope(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = self._settings_path(root)
+            path.parent.mkdir(parents=True)
+            user_hook = {
+                "hooks": {
+                    "SessionStart": [
+                        {
+                            "hooks": [
+                                {
+                                    "type": "command",
+                                    "command": "loopmetry",
+                                    "args": [
+                                        "capture-hook",
+                                        "--source",
+                                        "claude-code",
+                                        "--output",
+                                        "custom.jsonl",
+                                    ],
+                                }
+                            ]
+                        }
+                    ]
+                }
+            }
+            path.write_text(json.dumps(user_hook), encoding="utf-8")
+            result = self.run_cli(
+                "integrate", "claude-code", "--root", str(root), "--remove", "--force"
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("no changes needed", result.stdout)
+            self.assertEqual(json.loads(path.read_text(encoding="utf-8")), user_hook)
+
 
 class HistoryConsentTests(unittest.TestCase):
     """In-process tests for behavior mock.patch can observe (call counts)."""

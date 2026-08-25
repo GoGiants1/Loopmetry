@@ -44,13 +44,27 @@ loopmetry integrate claude-code --remove    # strip only the managed blocks (add
 modify it; creating the file from scratch, or re-running a command that would
 produce no change, never requires `--force`. Any modification of an existing
 file first writes a backup to `settings.local.json.bak` (overwritten on each
-run). An existing file that isn't valid JSON is a hard error, never silently
-treated as empty. The merge is structural and idempotent: it adds one managed
-block per hook event without touching unrelated settings or other hooks
-already in the file, and `--remove` strips only those managed blocks. Pass
-`--project-id` to embed a fixed `--project-id` in the generated command
-(otherwise `capture-hook`'s own default derivation applies at hook-run time).
-`--source codex` is not yet supported (planned for the Codex-parity slice).
+run). An existing file that isn't valid JSON, or whose `hooks` value (or a
+targeted event's value) is not the expected JSON shape, is a hard error on
+every mode, never silently ignored or partially applied.
+
+The merge is structural and idempotent: each hook event gets **exactly one**
+managed block, generated in exec form (`"command": "loopmetry"` with an
+`"args"` array) rather than a single shell-parsed string, so a `--project-id`
+containing spaces or shell metacharacters is passed through as one argument
+and never interpreted by a shell. Re-running `--apply` with a different
+`--project-id` replaces that one block in place rather than adding a second
+handler (and collapses any pre-existing duplicates down to one). `--remove`
+only ever touches the five events this installer manages, and only strips a
+block that structurally matches exactly what this installer would generate —
+a block scoped by `matcher` (fires for only a subset of the event's
+occurrences) or a handler with an `if` condition is never mistaken for full
+integration by `--apply`, and is never removed by `--remove`. Everything else
+already in the file — other settings, other hooks, other events — is left
+untouched. Pass `--project-id` to embed a fixed `--project-id` in the
+generated command (otherwise `capture-hook`'s own default derivation applies
+at hook-run time). `--source codex` is not yet supported (planned for the
+Codex-parity slice).
 
 ## Privacy boundary
 
@@ -90,7 +104,10 @@ The editable tool install makes `loopmetry` available to hook subprocesses witho
 
 ## Claude Code configuration
 
-A project-local `.claude/settings.local.json` can capture selected events:
+`loopmetry integrate claude-code --apply --project-id my-project` writes this
+to a project-local `.claude/settings.local.json` (exec form — `args` is
+passed straight to the process, never re-parsed by a shell, so a project ID
+with spaces or shell metacharacters stays a single argument):
 
 ```json
 {
@@ -100,7 +117,8 @@ A project-local `.claude/settings.local.json` can capture selected events:
         "hooks": [
           {
             "type": "command",
-            "command": "loopmetry capture-hook --source claude-code --project-id my-project"
+            "command": "loopmetry",
+            "args": ["capture-hook", "--source", "claude-code", "--project-id", "my-project"]
           }
         ]
       }
@@ -110,7 +128,8 @@ A project-local `.claude/settings.local.json` can capture selected events:
         "hooks": [
           {
             "type": "command",
-            "command": "loopmetry capture-hook --source claude-code --project-id my-project"
+            "command": "loopmetry",
+            "args": ["capture-hook", "--source", "claude-code", "--project-id", "my-project"]
           }
         ]
       }
@@ -120,7 +139,8 @@ A project-local `.claude/settings.local.json` can capture selected events:
         "hooks": [
           {
             "type": "command",
-            "command": "loopmetry capture-hook --source claude-code --project-id my-project"
+            "command": "loopmetry",
+            "args": ["capture-hook", "--source", "claude-code", "--project-id", "my-project"]
           }
         ]
       }
@@ -130,7 +150,8 @@ A project-local `.claude/settings.local.json` can capture selected events:
         "hooks": [
           {
             "type": "command",
-            "command": "loopmetry capture-hook --source claude-code --project-id my-project"
+            "command": "loopmetry",
+            "args": ["capture-hook", "--source", "claude-code", "--project-id", "my-project"]
           }
         ]
       }
@@ -140,7 +161,8 @@ A project-local `.claude/settings.local.json` can capture selected events:
         "hooks": [
           {
             "type": "command",
-            "command": "loopmetry capture-hook --source claude-code --project-id my-project"
+            "command": "loopmetry",
+            "args": ["capture-hook", "--source", "claude-code", "--project-id", "my-project"]
           }
         ]
       }
