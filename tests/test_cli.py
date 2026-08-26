@@ -258,6 +258,48 @@ class CliTests(unittest.TestCase):
             checkpoint = root / ".loopmetry" / "checkpoints" / "claude-code-history.json"
             self.assertTrue(checkpoint.exists())
 
+    def _make_codex_history_project(self, tmp: Path) -> tuple[Path, Path]:
+        root = tmp / "work" / "project"
+        root.mkdir(parents=True)
+        codex_home = tmp / "codex-home"
+        sessions_dir = codex_home / "sessions" / "2026" / "08" / "20"
+        sessions_dir.mkdir(parents=True)
+        record = {
+            "timestamp": "2026-08-20T09:00:00Z",
+            "type": "session_meta",
+            "payload": {"session_id": "s1", "cwd": str(root)},
+        }
+        user_record = {
+            "timestamp": "2026-08-20T09:01:00Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "hello"}],
+            },
+        }
+        (sessions_dir / "rollout-a.jsonl").write_text(
+            json.dumps(record) + "\n" + json.dumps(user_record) + "\n",
+            encoding="utf-8",
+        )
+        return root, codex_home
+
+    def test_history_import_source_codex_writes_default_output_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root, codex_home = self._make_codex_history_project(Path(tmp))
+            result = self.run_cli(
+                "history",
+                "import",
+                "--source",
+                "codex",
+                "--root",
+                str(root),
+                "--yes",
+                env={**os.environ, "LOOPMETRY_CODEX_HOME": str(codex_home)},
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue((root / ".loopmetry" / "events" / "codex-history.jsonl").exists())
+
     def test_history_import_twice_is_idempotent(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root, claude_home = self._make_history_project(Path(tmp))
@@ -500,11 +542,53 @@ class IntegrateTests(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 2)
 
-    def test_source_codex_not_yet_supported(self) -> None:
+    def _codex_config_path(self, root: Path) -> Path:
+        return root / ".codex" / "config.toml"
+
+    def test_integrate_codex_apply_creates_config_toml(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            result = self.run_cli("integrate", "codex", "--root", str(root), "--preview")
+            result = self.run_cli("integrate", "codex", "--root", str(root), "--apply")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            content = self._codex_config_path(root).read_text(encoding="utf-8")
+            self.assertIn("loopmetry capture-hook --source codex", content)
+
+    def test_integrate_codex_apply_on_existing_file_requires_force(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_dir = root / ".codex"
+            config_dir.mkdir()
+            (config_dir / "config.toml").write_text('[model]\nname = "gpt-5"\n', encoding="utf-8")
+            result = self.run_cli("integrate", "codex", "--root", str(root), "--apply")
             self.assertEqual(result.returncode, 2)
+
+    def test_integrate_codex_remove_is_noop_without_existing_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            result = self.run_cli("integrate", "codex", "--root", str(root), "--remove")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse(self._codex_config_path(root).exists())
+
+    def test_integrate_codex_corrupt_existing_toml_fails_closed(self) -> None:
+        # _run_integrate_codex's own except ValueError -> InputError translation
+        # (wrapping merge_config/remove_config's TOML-validation errors) had no
+        # CLI-entry-point test; this exercises it end to end for both --apply
+        # and --preview.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_dir = root / ".codex"
+            config_dir.mkdir()
+            path = config_dir / "config.toml"
+            path.write_text("not [ valid toml", encoding="utf-8")
+            original = path.read_text(encoding="utf-8")
+            for mode in ("--preview", "--apply"):
+                result = self.run_cli(
+                    "integrate", "codex", "--root", str(root), mode, "--force"
+                )
+                self.assertEqual(result.returncode, 2, mode)
+                self.assertIn("error:", result.stderr)
+                self.assertEqual(path.read_text(encoding="utf-8"), original)
+                self.assertFalse(path.with_name(path.name + ".bak").exists())
 
     def test_changing_project_id_replaces_hook_instead_of_adding_a_second_one(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -594,6 +678,45 @@ class HistoryConsentTests(unittest.TestCase):
         }
         (project_dir / "sess.jsonl").write_text(json.dumps(record) + "\n", encoding="utf-8")
         return root, claude_home
+
+    def _make_codex_history_project(self, tmp: Path) -> tuple[Path, Path]:
+        root = tmp / "work" / "project"
+        root.mkdir(parents=True)
+        codex_home = tmp / "codex-home"
+        sessions_dir = codex_home / "sessions" / "2026" / "08" / "20"
+        sessions_dir.mkdir(parents=True)
+        record = {
+            "timestamp": "2026-08-20T09:00:00Z",
+            "type": "session_meta",
+            "payload": {"session_id": "s1", "cwd": str(root)},
+        }
+        (sessions_dir / "rollout-a.jsonl").write_text(json.dumps(record) + "\n", encoding="utf-8")
+        return root, codex_home
+
+    def test_import_interactive_prompts_and_messages_reflect_codex_source(self) -> None:
+        # Both hardcoded consent-prompt strings in _run_history's import branch
+        # must reflect --source rather than always saying "Claude Code".
+        with tempfile.TemporaryDirectory() as tmp:
+            root, codex_home = self._make_codex_history_project(Path(tmp))
+            answers = iter(["y", "n"])  # scan yes, then decline to actually import
+            with (
+                mock.patch("sys.stdin.isatty", return_value=True),
+                mock.patch(
+                    "builtins.input", side_effect=lambda prompt: next(answers)
+                ) as mock_input,
+                mock.patch.dict(os.environ, {"LOOPMETRY_CODEX_HOME": str(codex_home)}),
+            ):
+                with contextlib.redirect_stdout(io.StringIO()) as captured:
+                    code = main(
+                        ["history", "import", "--source", "codex", "--root", str(root)]
+                    )
+            self.assertEqual(code, 0)
+            first_prompt = mock_input.call_args_list[0].args[0]
+            self.assertIn("Codex", first_prompt)
+            self.assertNotIn("Claude Code", first_prompt)
+            output = captured.getvalue()
+            self.assertIn("Codex", output)
+            self.assertNotIn("Claude Code", output)
 
     def test_import_without_yes_never_reads_transcripts_when_not_interactive(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -25,6 +25,7 @@ from loopmetry.adapters.checkpoints import (
     save_checkpoint,
 )
 from loopmetry.adapters.hook import HookSourceAdapter
+from loopmetry.schema import CaptureMode, ProvenanceRecord
 
 
 def _candidate(candidate_id: str, size: int) -> SourceCandidate:
@@ -411,6 +412,192 @@ class HookSourceAdapterTests(unittest.TestCase):
             self.assertTrue(
                 all(value == Coverage.NONE for value in run.coverage.categories.values())
             )
+
+
+class CrossAdapterCapabilityTests(unittest.TestCase):
+    def test_claude_code_and_codex_report_comparable_capability_shapes(self) -> None:
+        from loopmetry.adapters.claude_code_history import ClaudeCodeHistoryAdapter
+        from loopmetry.adapters.codex_history import CodexHistoryAdapter
+
+        claude_caps = ClaudeCodeHistoryAdapter().capabilities()
+        codex_caps = CodexHistoryAdapter().capabilities()
+        self.assertTrue(set(claude_caps.evidence_categories) <= set(EVIDENCE_CATEGORIES))
+        self.assertTrue(set(codex_caps.evidence_categories) <= set(EVIDENCE_CATEGORIES))
+        self.assertIn(CaptureMode.HISTORY_BACKFILL, claude_caps.capture_modes)
+        self.assertIn(CaptureMode.HISTORY_BACKFILL, codex_caps.capture_modes)
+
+    def test_both_history_adapters_only_ever_report_valid_coverage_values(self) -> None:
+        from loopmetry.adapters.claude_code_history import ClaudeCodeHistoryAdapter
+        from loopmetry.adapters.codex_history import CodexHistoryAdapter
+
+        for adapter in (ClaudeCodeHistoryAdapter(), CodexHistoryAdapter()):
+            report = CoverageReport(
+                categories={c: Coverage.FULL for c in adapter.capabilities().evidence_categories}
+            )
+            round_tripped = CoverageReport.from_mapping(report.to_mapping())
+            self.assertEqual(round_tripped.categories, report.categories)
+
+
+def _provenance_record_for(source: str, capture_mode: CaptureMode) -> ProvenanceRecord:
+    return ProvenanceRecord(source=source, capture_mode=capture_mode, adapter_version="1.0.0")
+
+
+class CrossSourceMergeTests(unittest.TestCase):
+    """Regression guard: the generic merge machinery in event_merge and
+    storage.EventStore already handles events from two different sources
+    (claude-code and codex) correctly, not just within one source. Slice 4's
+    hybrid ``--source auto`` orchestration builds on this; this task adds no
+    new merge code.
+
+    Note on the top-level ``Event.source`` field vs. per-record
+    ``ProvenanceRecord.source``: ``event_merge.events_conflict`` compares the
+    full event mapping *except* ``provenance`` and ``schema_version`` (see
+    ``event_merge._comparable_mapping``), so ``Event.source`` is part of the
+    identity that must match for a merge to succeed — same as project_id,
+    session_id, timestamp, type, actor, and data. Two independent adapters
+    that both observe the *same* canonical event (e.g. the same command run,
+    picked up once via a claude-code hook and once via codex history
+    backfill) therefore share one canonical top-level ``source`` while each
+    contributes its own ``ProvenanceRecord`` with a distinct per-record
+    ``source`` — exactly the pattern the existing same-source test
+    (``test_storage.test_add_events_merges_provenance_on_duplicate_event_id``)
+    already exercises for two claude-code capture modes. These tests extend
+    that same pattern across the claude-code/codex boundary by varying only
+    ``ProvenanceRecord.source``, holding the canonical ``Event.source``
+    constant, and confirmed that varying the canonical ``Event.source``
+    itself between the two sides instead makes ``events_conflict`` report a
+    conflict every time (regardless of ``data``), since ``source`` is part of
+    the compared mapping.
+
+    A separate test below (``test_event_store_ingests_two_independent_events_from_different_sources``)
+    covers the actually-realistic hybrid-run scenario: two independent events
+    with distinct event_ids, each with its own top-level ``Event.source``,
+    ingested in one ``add_events`` batch. There, ``Event.source`` genuinely
+    varies since there is no event_id collision to compare across.
+    """
+
+    def _event(
+        self,
+        event_id: str,
+        observed_by: str,
+        capture_mode: CaptureMode,
+        *,
+        canonical_source: str = "claude-code",
+        data: dict | None = None,
+        session_id: str = "s1",
+    ):
+        """Build an Event whose per-record ``ProvenanceRecord.source`` is
+        ``observed_by`` (the varying axis these tests exercise), while the
+        top-level canonical ``Event.source`` defaults to a fixed
+        "claude-code" identity unless ``canonical_source`` is overridden.
+        """
+        from loopmetry.schema import Actor, Event, EventType
+
+        return Event(
+            event_id=event_id,
+            project_id="proj",
+            session_id=session_id,
+            timestamp=datetime(2026, 8, 25, tzinfo=timezone.utc),
+            type=EventType.COMMAND,
+            actor=Actor.TOOL,
+            source=canonical_source,
+            data=data if data is not None else {"command": "pytest", "status": "unknown"},
+            provenance=(_provenance_record_for(observed_by, capture_mode),),
+        )
+
+    def test_same_event_id_merges_across_claude_code_and_codex_sources(self) -> None:
+        from loopmetry.event_merge import merge_events
+
+        claude_side = self._event("shared-id", observed_by="claude-code", capture_mode=CaptureMode.HOOK)
+        codex_side = self._event(
+            "shared-id", observed_by="codex", capture_mode=CaptureMode.HISTORY_BACKFILL
+        )
+        merged = merge_events(claude_side, codex_side)
+        self.assertEqual(len(merged.provenance), 2)
+        sources = {record.source for record in merged.provenance}
+        self.assertEqual(sources, {"claude-code", "codex"})
+
+    def test_genuinely_conflicting_cross_source_event_raises(self) -> None:
+        from loopmetry.event_merge import EventConflictError, merge_events
+
+        claude_side = self._event("shared-id", observed_by="claude-code", capture_mode=CaptureMode.HOOK)
+        codex_side = self._event(
+            "shared-id",
+            observed_by="codex",
+            capture_mode=CaptureMode.HISTORY_BACKFILL,
+            data={"command": "ruff", "status": "unknown"},
+        )
+        with self.assertRaises(EventConflictError):
+            merge_events(claude_side, codex_side)
+
+    def test_event_store_ingests_mixed_source_batch_without_duplication(self) -> None:
+        from loopmetry.storage import EventStore
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = EventStore(Path(tmp) / "events.db")
+            claude_side = self._event("shared-id", observed_by="claude-code", capture_mode=CaptureMode.HOOK)
+            codex_side = self._event(
+                "shared-id", observed_by="codex", capture_mode=CaptureMode.HISTORY_BACKFILL
+            )
+            result = store.add_events([claude_side, codex_side])
+            # A single add_events call inserts the first event (inserted=1),
+            # then the second collides on event_id and is folded into the
+            # first via merge_events, which adds new provenance and is
+            # counted as merged=1 (see storage.EventStore.add_events and the
+            # matching same-source expectations in test_storage.py).
+            self.assertEqual(result.inserted, 1)
+            self.assertEqual(result.merged, 1)
+            self.assertEqual(result.skipped, 0)
+
+            stored = store.list_events("proj")
+            self.assertEqual(len(stored), 1)
+            self.assertEqual(len(stored[0].provenance), 2)
+
+    def test_event_store_ingests_two_independent_events_from_different_sources(self) -> None:
+        """The realistic slice-4 (--source auto) scenario: a single
+        add_events batch contains two genuinely independent events with
+        distinct event_ids, one observed by claude-code and one by codex.
+        This time the top-level Event.source itself varies (there is no
+        event_id collision, so events_conflict never compares them against
+        each other), and both must land as separate rows with their own
+        single-record provenance, never merged or cross-contaminated.
+        """
+        from loopmetry.storage import EventStore
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = EventStore(Path(tmp) / "events.db")
+            claude_event = self._event(
+                "claude-event",
+                observed_by="claude-code",
+                capture_mode=CaptureMode.HOOK,
+                canonical_source="claude-code",
+            )
+            codex_event = self._event(
+                "codex-event",
+                observed_by="codex",
+                capture_mode=CaptureMode.HISTORY_BACKFILL,
+                canonical_source="codex",
+            )
+            result = store.add_events([claude_event, codex_event])
+            self.assertEqual(result.inserted, 2)
+            self.assertEqual(result.merged, 0)
+            self.assertEqual(result.skipped, 0)
+
+            stored = store.list_events("proj")
+            self.assertEqual(len(stored), 2)
+            by_id = {event.event_id: event for event in stored}
+            self.assertEqual(set(by_id), {"claude-event", "codex-event"})
+
+            claude_stored = by_id["claude-event"]
+            codex_stored = by_id["codex-event"]
+
+            self.assertEqual(claude_stored.source, "claude-code")
+            self.assertEqual(len(claude_stored.provenance), 1)
+            self.assertEqual(claude_stored.provenance[0].source, "claude-code")
+
+            self.assertEqual(codex_stored.source, "codex")
+            self.assertEqual(len(codex_stored.provenance), 1)
+            self.assertEqual(codex_stored.provenance[0].source, "codex")
 
 
 if __name__ == "__main__":

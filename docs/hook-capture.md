@@ -20,18 +20,20 @@ Use `--project-id` to avoid the default pseudonymous ID derived from the working
 
 ## Relationship to historical backfill
 
-Hook capture is the recommended prospective path, not a prerequisite for analysis (decision D-011). A consented historical-backfill adapter recovers existing Claude Code sessions without prior setup (Codex backfill remains planned, slice 5), and a hybrid `loopmetry run --source auto` mode will merge both paths into the same canonical event schema (slice 4). Installing hooks improves forward capture stability and privacy minimization at the point of collection; skipping them only means analysis relies on backfill or explicit input.
+Hook capture is the recommended prospective path, not a prerequisite for analysis (decision D-011). Consented historical-backfill adapters recover existing Claude Code and Codex sessions without prior setup. `loopmetry run --source auto` actively imports consented Claude Code history and merges it with hook, explicit, and previously imported Codex history evidence; Codex history can be imported first with `loopmetry history import --source codex`. Installing hooks improves forward capture stability and privacy minimization at the point of collection; skipping them only means analysis relies on backfill or explicit input.
 
 Discovery is bounded to this project's own sessions under `~/.claude/projects/<encoded-project-root>/`, confirmed from each session's recorded `cwd` rather than the (lossy) directory name alone:
 
 ```bash
 loopmetry history preview --source claude-code
 loopmetry history import --source claude-code --since 2026-08-01
+loopmetry history preview --source codex
+loopmetry history import --source codex --since 2026-08-01
 ```
 
-`preview` is read-only and lists candidate sessions and discovery diagnostics without importing anything. `import` requires consent — an interactive TTY confirms before reading, and a non-interactive run requires `--yes` (per invariant 10, `loopmetry run` never triggers a history read implicitly). `--since YYYY-MM-DD` narrows the discovery window. Imported events land in `.loopmetry/events/claude-code-history.jsonl` with `history-backfill` provenance, and a checkpoint under `.loopmetry/checkpoints/` makes re-import incremental — only new transcript content is re-read, and a Bash call's outcome is written at most once (see decision D-013 for why unresolved `tool_use`/`tool_result` pairs are carried across imports instead of guessed at eagerly).
+`preview` is read-only and lists candidate sessions and discovery diagnostics without importing anything. `import` requires consent — an interactive TTY confirms before reading, and a non-interactive run requires `--yes`. `--since YYYY-MM-DD` narrows the discovery window. Imported events land in `.loopmetry/events/claude-code-history.jsonl` or `.loopmetry/events/codex-history.jsonl` with `history-backfill` provenance, and per-source checkpoints under `.loopmetry/checkpoints/` make re-import incremental. Unresolved tool calls remain checkpointed until a later result arrives or the session is confirmed stalled (decision D-013).
 
-`loopmetry integrate claude-code --preview|--apply|--remove` generates the configuration below deterministically instead of copy-pasting it by hand:
+`loopmetry integrate <source> --preview|--apply|--remove` generates the configuration below deterministically instead of copy-pasting it by hand (supported sources: `claude-code`, `codex`):
 
 ```bash
 loopmetry integrate claude-code --preview   # show the exact diff, write nothing
@@ -63,8 +65,19 @@ integration by `--apply`, and is never removed by `--remove`. Everything else
 already in the file — other settings, other hooks, other events — is left
 untouched. Pass `--project-id` to embed a fixed `--project-id` in the
 generated command (otherwise `capture-hook`'s own default derivation applies
-at hook-run time). `--source codex` is not yet supported (planned for the
-Codex-parity slice).
+at hook-run time).
+
+`integrate codex` targets `<root>/.codex/config.toml` instead of
+`.claude/settings.local.json`. Because Codex's hook config has no exec-form
+`args` array, the installer embeds the whole invocation as a single
+shell-parsed `command` string, and protects a `--project-id` containing
+spaces or shell metacharacters with `shlex.quote()` rather than exec-form
+argument separation — a different safety mechanism from the JSON installer's,
+worth calling out explicitly rather than treating the two sources as
+interchangeable. Like the JSON path, it backs up an existing file to
+`config.toml.bak` before any modifying write, and it hard-errors on invalid
+existing TOML (or a `hooks` table/array shape it doesn't recognize) rather
+than overwriting it.
 
 ## Privacy boundary
 
@@ -175,7 +188,10 @@ The hook performs no LLM call. It only normalizes and appends evidence, keeping 
 
 ## Codex configuration
 
-A project-local `.codex/config.toml` can use the same capture command:
+`loopmetry integrate codex --apply --project-id my-project` is the preferred
+way to generate a project-local `.codex/config.toml`; hand-editing is shown
+below only to make the resulting shape explicit. It uses the same capture
+command:
 
 ```toml
 [[hooks.UserPromptSubmit]]
@@ -265,12 +281,14 @@ Captured hooks do not yet infer requirements or acceptance criteria from free-fo
 | Session/task lifecycle | Supported | Supported where emitted | Stored as non-scored notes; includes `TaskCompleted` |
 | User interaction | Hashed metadata | Hashed metadata | Prompt content omitted |
 | File reads | Supported when path supplied | Supported when path supplied | Relative paths only |
-| File changes | Write/Edit/apply-patch family | apply-patch/write family | Patch body omitted |
-| Commands | Content-minimized label | Content-minimized label | Full command omitted |
-| Test/lint/type/build/security checks | Heuristic command classification | Heuristic command classification | Handles direct and bounded nested response status; ambiguity remains a gap |
-| Errors | Tool failure or non-zero command | Tool failure or non-zero command | Output body omitted |
+| File changes | Write/Edit/apply-patch family | apply-patch/write family (hook); apply-patch family (history)[^codex-history] | Patch body omitted |
+| Commands | Content-minimized label | Content-minimized label (status unknown in history)[^codex-history] | Full command omitted |
+| Test/lint/type/build/security checks | Heuristic command classification | Hook capture only; history excludes verification evidence[^codex-history] | Handles direct and bounded nested response status; ambiguity remains a gap |
+| Errors | Tool failure or non-zero command | Hook capture only; history excludes exit-code signals[^codex-history] | Output body omitted |
 | Commits | Local HEAD after successful `git commit` | Same | Message and author omitted |
 | Requirements and acceptance criteria | Not inferred | Not inferred | Planned explicit importer |
 | Subagent details | Lifecycle note only | Lifecycle note only | Delegation graph planned |
+
+[^codex-history]: Codex's historical-backfill adapter (`adapters/codex_history.py`) can extract commands and apply_patch file changes from rollout files, but Codex's rollout format never persists a command exit-code or success signal (confirmed against `openai/codex` source) — every backfilled `command` event's status is `"unknown"`, distinguishing it from live hook capture, which does get a real exit status. Session attribution is by `session_meta.cwd`, the same scoping Claude Code's adapter uses; unattributed sessions are excluded, not widened into scope.
 
 Every unsupported or ambiguous source behavior should remain a measurement gap rather than a fabricated event.

@@ -18,6 +18,7 @@ from . import __version__
 from .adapters.base import AdapterError, AdapterRun, DiscoveryContext, SourceAdapter
 from .adapters.checkpoints import atomic_write_bytes, load_checkpoint, save_checkpoint
 from .adapters.claude_code_history import ClaudeCodeHistoryAdapter
+from .adapters.codex_history import CodexHistoryAdapter
 from .admin_server import (
     DEFAULT_ADMIN_BIND,
     DEFAULT_ADMIN_PORT,
@@ -35,6 +36,7 @@ from .hook_capture import (
     normalize_hook_payload,
 )
 from .hook_integration import format_settings, merge_settings, remove_settings
+from .hook_integration_codex import merge_config, remove_config
 from .io import InputError, load_jsonl, select_project
 from .llm_bundle import BundleError, build_evaluation_bundle, render_evaluation_bundle
 from .report import render
@@ -51,8 +53,23 @@ from .submission import (
 from .workflow import discover_event_files, run_participant_workflow
 
 DEFAULT_CLAUDE_HOME_ENV = "LOOPMETRY_CLAUDE_HOME"
-_HISTORY_ADAPTERS: dict[str, type] = {"claude-code": ClaudeCodeHistoryAdapter}
-
+DEFAULT_CODEX_HOME_ENV = "LOOPMETRY_CODEX_HOME"
+_HISTORY_ADAPTERS: dict[str, type] = {
+    "claude-code": ClaudeCodeHistoryAdapter,
+    "codex": CodexHistoryAdapter,
+}
+_HOME_ENV_BY_SOURCE: dict[str, str] = {
+    "claude-code": DEFAULT_CLAUDE_HOME_ENV,
+    "codex": DEFAULT_CODEX_HOME_ENV,
+}
+_HOME_KWARG_BY_SOURCE: dict[str, str] = {
+    "claude-code": "claude_home",
+    "codex": "codex_home",
+}
+_DEFAULT_OUTPUT_NAME: dict[str, str] = {
+    "claude-code": "claude-code-history.jsonl",
+    "codex": "codex-history.jsonl",
+}
 DEFAULT_DB = Path(".loopmetry/loopmetry.db")
 DEFAULT_ADMIN_DB = Path(".loopmetry/admin.db")
 DEFAULT_SERVER_ENV = "LOOPMETRY_SERVER_URL"
@@ -456,7 +473,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "integrate",
         help="Preview, apply, or remove local hook configuration for a capture source.",
     )
-    integrate.add_argument("source", choices=("claude-code",))
+    integrate.add_argument("source", choices=("claude-code", "codex"))
     integrate.add_argument("--root", default=".")
     integrate.add_argument(
         "--project-id", default=None, help="Embed a fixed --project-id in the generated hook command."
@@ -504,6 +521,12 @@ def _write_events_atomically(path: Path, events: Sequence[Event]) -> None:
 
 
 def _run_integrate(args: argparse.Namespace) -> int:
+    if args.source == "codex":
+        return _run_integrate_codex(args)
+    return _run_integrate_claude_code(args)
+
+
+def _run_integrate_claude_code(args: argparse.Namespace) -> int:
     root = Path(args.root).expanduser()
     path = root / ".claude" / "settings.local.json"
     existing_text = path.read_text(encoding="utf-8") if path.is_file() else None
@@ -526,7 +549,34 @@ def _run_integrate(args: argparse.Namespace) -> int:
 
     old_text = existing_text or ""
     new_text = format_settings(merged) if changed else old_text
+    return _finish_integrate(args, path, existing_text, old_text, new_text)
 
+
+def _run_integrate_codex(args: argparse.Namespace) -> int:
+    root = Path(args.root).expanduser()
+    path = root / ".codex" / "config.toml"
+    existing_text = path.read_text(encoding="utf-8") if path.is_file() else None
+    old_text = existing_text or ""
+    try:
+        if args.remove:
+            new_text, changed = remove_config(old_text)
+        else:
+            new_text, changed = merge_config(old_text, args.project_id)
+    except ValueError as exc:
+        raise InputError(f"{path}: {exc}; fix or remove it manually") from exc
+    if not changed:
+        new_text = old_text
+    return _finish_integrate(args, path, existing_text, old_text, new_text)
+
+
+def _finish_integrate(
+    args: argparse.Namespace,
+    path: Path,
+    existing_text: str | None,
+    old_text: str,
+    new_text: str,
+) -> int:
+    changed = new_text != old_text
     if args.preview:
         if not changed:
             print("no changes needed")
@@ -577,9 +627,13 @@ def _consented_history_import(
     unconditionally when interactive=True, matching history import's existing
     behavior regardless of any consent flag.
     """
+    source_label = {
+        "claude-code-history": "Claude Code",
+        "codex-history": "Codex",
+    }.get(adapter.name, adapter.name)
     if interactive:
         scan_answer = input(
-            "Scan local Claude Code history for this project to preview "
+            f"Scan local {source_label} history for this project to preview "
             "importable sessions? [y/N] "
         ).strip().lower()
         if scan_answer != "y":
@@ -592,7 +646,7 @@ def _consented_history_import(
     if interactive:
         print(
             f"{preview.session_count} session(s), {preview.total_size_bytes} byte(s) "
-            "of local Claude Code history will be read."
+            f"of local {source_label} history will be read."
         )
         answer = input("Proceed with import? [y/N] ").strip().lower()
         if answer != "y":
@@ -660,9 +714,9 @@ def _run_history(args: argparse.Namespace) -> int:
     since = _parse_since(args.since)
     interactive = sys.stdin.isatty()
     context = DiscoveryContext(project_root=root, since=since, interactive=interactive)
-    claude_home_raw = os.environ.get(DEFAULT_CLAUDE_HOME_ENV)
-    claude_home = Path(claude_home_raw).expanduser() if claude_home_raw else None
-    adapter = _HISTORY_ADAPTERS[args.source](claude_home=claude_home)
+    home_raw = os.environ.get(_HOME_ENV_BY_SOURCE[args.source])
+    home = Path(home_raw).expanduser() if home_raw else None
+    adapter = _HISTORY_ADAPTERS[args.source](**{_HOME_KWARG_BY_SOURCE[args.source]: home})
 
     if args.history_command == "discover":
         candidates = adapter.discover(context)
@@ -750,7 +804,7 @@ def _run_history(args: argparse.Namespace) -> int:
         output_path = (
             Path(args.output).expanduser()
             if args.output
-            else root / ".loopmetry" / "events" / "claude-code-history.jsonl"
+            else root / ".loopmetry" / "events" / _DEFAULT_OUTPUT_NAME[args.source]
         )
         _consented_history_import(adapter, context, root, interactive=interactive, output_path=output_path)
         return 0
