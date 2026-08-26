@@ -70,6 +70,10 @@ _DEFAULT_OUTPUT_NAME: dict[str, str] = {
     "claude-code": "claude-code-history.jsonl",
     "codex": "codex-history.jsonl",
 }
+_SOURCE_LABEL: dict[str, str] = {
+    "claude-code": "Claude Code",
+    "codex": "Codex",
+}
 
 DEFAULT_DB = Path(".loopmetry/loopmetry.db")
 DEFAULT_ADMIN_DB = Path(".loopmetry/admin.db")
@@ -620,7 +624,7 @@ def _run_history(args: argparse.Namespace) -> int:
         # (with real counts) before actually importing.
         if interactive:
             scan_answer = input(
-                "Scan local Claude Code history for this project to preview "
+                f"Scan local {_SOURCE_LABEL[args.source]} history for this project to preview "
                 "importable sessions? [y/N] "
             ).strip().lower()
             if scan_answer != "y":
@@ -638,7 +642,7 @@ def _run_history(args: argparse.Namespace) -> int:
         if interactive:
             print(
                 f"{preview.session_count} session(s), {preview.total_size_bytes} byte(s) "
-                "of local Claude Code history will be read."
+                f"of local {_SOURCE_LABEL[args.source]} history will be read."
             )
             answer = input("Proceed with import? [y/N] ").strip().lower()
             if answer != "y":

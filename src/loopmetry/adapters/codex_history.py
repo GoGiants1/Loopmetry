@@ -382,6 +382,10 @@ class _SessionParser:
                     envelope_type = record.get("type")
                     payload = record.get("payload")
                     if envelope_type == "session_meta":
+                        if isinstance(payload, Mapping):
+                            real_session_id = payload.get("session_id") or payload.get("id")
+                            if isinstance(real_session_id, str) and real_session_id:
+                                self.session_id = real_session_id
                         continue
                     if envelope_type != "response_item" or not isinstance(payload, Mapping):
                         self._count(
@@ -445,8 +449,14 @@ class _SessionParser:
 
     def _pending_entry(self, index: int, command: list[str], timestamp: str) -> dict[str, Any]:
         joined = " ".join(str(part) for part in command)
-        label, verification_kind = command_signature(joined)
         is_apply_patch = bool(command) and command[0] == "apply_patch"
+        # _resolve never reads command_label/verification_kind for apply_patch
+        # calls (it takes the patch_files branch instead), so skip the work of
+        # computing them in that case.
+        if is_apply_patch:
+            label, verification_kind = None, None
+        else:
+            label, verification_kind = command_signature(joined)
         patch_files: list[dict[str, str]] = []
         if is_apply_patch and len(command) > 1 and isinstance(command[1], str):
             for action, raw_path in _patch_target_paths(command[1]):

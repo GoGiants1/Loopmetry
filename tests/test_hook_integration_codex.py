@@ -71,6 +71,35 @@ class MergeConfigTests(unittest.TestCase):
         self.assertEqual(once.count("[[hooks.UserPromptSubmit]]"), 1)
         self.assertEqual(once.count("[[hooks.UserPromptSubmit.hooks]]"), 1)
 
+    def test_owned_block_with_leading_whitespace_on_header_is_recognized(self) -> None:
+        # A hand-edited or differently-formatted file may indent the header
+        # line -- still valid TOML. If the header regex required zero leading
+        # whitespace, this block would be seen as unowned and a duplicate
+        # block would be appended alongside it on the next merge.
+        once, _ = merge_config("", "proj-a")
+        indented = once.replace(
+            "[[hooks.UserPromptSubmit]]", "    [[hooks.UserPromptSubmit]]", 1
+        )
+        merged, changed = merge_config(indented, "proj-a")
+        self.assertFalse(changed)
+        self.assertEqual(merged, indented)
+        self.assertEqual(merged.count("[[hooks.UserPromptSubmit]]"), 1)
+
+    def test_owned_block_with_trailing_comment_on_header_is_recognized(self) -> None:
+        # A trailing "# comment" on the header line is also valid TOML. If the
+        # header regex required the line to end immediately after "]]", this
+        # block would be seen as unowned and duplicated on the next merge.
+        once, _ = merge_config("", "proj-a")
+        commented = once.replace(
+            "[[hooks.UserPromptSubmit]]",
+            "[[hooks.UserPromptSubmit]]  # managed by loopmetry",
+            1,
+        )
+        merged, changed = merge_config(commented, "proj-a")
+        self.assertFalse(changed)
+        self.assertEqual(merged, commented)
+        self.assertEqual(merged.count("[[hooks.UserPromptSubmit]]"), 1)
+
 
 class RemoveConfigTests(unittest.TestCase):
     def test_remove_on_file_with_nothing_managed_is_noop(self) -> None:

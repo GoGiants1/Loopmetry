@@ -77,7 +77,7 @@ def _block_spans(existing_text: str, event: str) -> list[tuple[int, int]]:
     """
 
     escaped_event = re.escape(event)
-    header_re = re.compile(rf"(?m)^\[\[hooks\.{escaped_event}\]\][ \t]*$")
+    header_re = re.compile(rf"(?m)^[ \t]*\[\[hooks\.{escaped_event}\]\][ \t]*(#.*)?$")
     boundary_re = re.compile(rf"(?m)^\[(?!\[hooks\.{escaped_event}\.)")
     spans: list[tuple[int, int]] = []
     for match in header_re.finditer(existing_text):

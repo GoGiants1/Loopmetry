@@ -63,7 +63,19 @@ integration by `--apply`, and is never removed by `--remove`. Everything else
 already in the file — other settings, other hooks, other events — is left
 untouched. Pass `--project-id` to embed a fixed `--project-id` in the
 generated command (otherwise `capture-hook`'s own default derivation applies
-at hook-run time). Both `claude-code` and `codex` sources are supported.
+at hook-run time).
+
+`integrate codex` targets `<root>/.codex/config.toml` instead of
+`.claude/settings.local.json`. Because Codex's hook config has no exec-form
+`args` array, the installer embeds the whole invocation as a single
+shell-parsed `command` string, and protects a `--project-id` containing
+spaces or shell metacharacters with `shlex.quote()` rather than exec-form
+argument separation — a different safety mechanism from the JSON installer's,
+worth calling out explicitly rather than treating the two sources as
+interchangeable. Like the JSON path, it backs up an existing file to
+`config.toml.bak` before any modifying write, and it hard-errors on invalid
+existing TOML (or a `hooks` table/array shape it doesn't recognize) rather
+than overwriting it.
 
 ## Privacy boundary
 
@@ -174,7 +186,10 @@ The hook performs no LLM call. It only normalizes and appends evidence, keeping 
 
 ## Codex configuration
 
-A project-local `.codex/config.toml` can use the same capture command:
+`loopmetry integrate codex --apply --project-id my-project` is the preferred
+way to generate a project-local `.codex/config.toml`; hand-editing is shown
+below only to make the resulting shape explicit. It uses the same capture
+command:
 
 ```toml
 [[hooks.UserPromptSubmit]]
@@ -224,7 +239,7 @@ Captured hooks do not yet infer requirements or acceptance criteria from free-fo
 | Session/task lifecycle | Supported | Supported where emitted | Stored as non-scored notes; includes `TaskCompleted` |
 | User interaction | Hashed metadata | Hashed metadata | Prompt content omitted |
 | File reads | Supported when path supplied | Supported when path supplied | Relative paths only |
-| File changes | Write/Edit/apply-patch family | apply-patch family (history)[^codex-history] | Patch body omitted |
+| File changes | Write/Edit/apply-patch family | apply-patch/write family (hook); apply-patch family (history)[^codex-history] | Patch body omitted |
 | Commands | Content-minimized label | Content-minimized label (status unknown in history)[^codex-history] | Full command omitted |
 | Test/lint/type/build/security checks | Heuristic command classification | Hook capture only; history excludes verification evidence[^codex-history] | Handles direct and bounded nested response status; ambiguity remains a gap |
 | Errors | Tool failure or non-zero command | Hook capture only; history excludes exit-code signals[^codex-history] | Output body omitted |
