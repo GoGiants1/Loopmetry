@@ -70,7 +70,6 @@ _DEFAULT_OUTPUT_NAME: dict[str, str] = {
     "claude-code": "claude-code-history.jsonl",
     "codex": "codex-history.jsonl",
 }
-
 DEFAULT_DB = Path(".loopmetry/loopmetry.db")
 DEFAULT_ADMIN_DB = Path(".loopmetry/admin.db")
 DEFAULT_SERVER_ENV = "LOOPMETRY_SERVER_URL"

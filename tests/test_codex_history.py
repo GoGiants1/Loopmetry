@@ -318,6 +318,7 @@ class CheckpointResumeTests(unittest.TestCase):
             candidates = adapter.discover(context)
             first_run = adapter.import_candidates(candidates, context)
             self.assertEqual(len(first_run.events), 1)
+            self.assertEqual(first_run.events[0].session_id, "sess-0001")
 
             with path.open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps(_user_message("second")) + "\n")
@@ -326,6 +327,7 @@ class CheckpointResumeTests(unittest.TestCase):
                 candidates_again, context, checkpoint=first_run.checkpoint
             )
             self.assertEqual(len(second_run.events), 1)
+            self.assertEqual(second_run.events[0].session_id, "sess-0001")
             self.assertNotEqual(first_run.events[0].event_id, second_run.events[0].event_id)
 
     def test_rotated_rollout_resets_checkpoint(self) -> None:

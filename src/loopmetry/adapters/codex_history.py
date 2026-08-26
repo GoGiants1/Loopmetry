@@ -188,6 +188,7 @@ class CodexHistoryAdapter:
                 path=path,
                 project_id=project_id,
                 project_root=project_root,
+                session_id=candidate.session_id,
                 start_index=start_index,
                 pending_seed=pending_seed,
             )
@@ -332,6 +333,7 @@ class _SessionParser:
         path: Path,
         project_id: str,
         project_root: Path,
+        session_id: str,
         start_index: int,
         pending_seed: Mapping[str, Mapping[str, Any]],
     ) -> None:
@@ -342,7 +344,7 @@ class _SessionParser:
         self.pending: dict[str, dict[str, Any]] = {
             key: dict(value) for key, value in pending_seed.items()
         }
-        self.session_id = path.stem
+        self.session_id = session_id
         self.total_lines = 0
         self.diagnostic_counts: dict[tuple[str, str], int] = {}
         self.emitted_command = False
@@ -484,8 +486,14 @@ class _SessionParser:
 
     def _pending_entry(self, index: int, command: list[str], timestamp: str) -> dict[str, Any]:
         joined = " ".join(str(part) for part in command)
-        label, verification_kind = command_signature(joined)
         is_apply_patch = bool(command) and command[0] == "apply_patch"
+        # _resolve never reads command_label/verification_kind for apply_patch
+        # calls (it takes the patch_files branch instead), so skip the work of
+        # computing them in that case.
+        if is_apply_patch:
+            label, verification_kind = None, None
+        else:
+            label, verification_kind = command_signature(joined)
         patch_files: list[dict[str, str]] = []
         if is_apply_patch and len(command) > 1 and isinstance(command[1], str):
             for action, raw_path in _patch_target_paths(command[1]):
